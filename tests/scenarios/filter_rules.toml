@@ -1,0 +1,73 @@
+# The [filter] module: ordered answer/ignore rules by inbox, account and group, before the gate.
+#   python tests/harness.py tests/scenarios/filter_rules.toml
+[harness]
+step_timeout = 180
+no_reply_wait = 8
+
+[config.llm]
+provider = "claude-code"
+
+[config.claude_code]
+model = "haiku"
+max_turns = 2
+timeout_secs = 120
+workdir = "./workdir"
+allowed_tools = []
+
+[config.filter]
+default = "ignore"                    # answer only who a rule lets through
+
+[[config.filter.rules]]
+name = "muted person"
+action = "ignore"
+inboxes = ["inboxmuted"]
+
+[[config.filter.rules]]
+name = "team group"
+action = "answer"
+groups = ["conv_team"]
+
+[[config.filter.rules]]
+name = "friends"
+action = "answer"
+inboxes = ["inboxfriend", "inboxmuted"]
+
+[files]
+"workdir/CLAUDE.md" = "You are a test bot. Reply with one short sentence."
+
+[[steps]]
+name = "friend answered"
+conversation = "c_friend"
+sender = "inboxfriend"
+text = "Say FRIENDOK and nothing else."
+expect = [{contains = "FRIENDOK"}]
+
+[[steps]]
+name = "first rule wins (muted)"
+conversation = "c_muted"
+sender = "inboxmuted"
+text = "hello"
+expect = [{no_reply = true}]
+
+[[steps]]
+name = "stranger: default ignore"
+conversation = "c_stranger"
+sender = "inboxstranger"
+text = "hello"
+expect = [{no_reply = true}]
+
+[[steps]]
+name = "team group answered (any sender)"
+conversation = "conv_team"
+kind = "group"
+sender = "inboxstranger"
+text = "Say TEAMOK and nothing else."
+expect = [{contains = "TEAMOK"}]
+
+[[steps]]
+name = "other group ignored"
+conversation = "conv_other"
+kind = "group"
+sender = "inboxfriend"
+text = "hello"
+expect = [{no_reply = true}]

@@ -1,0 +1,47 @@
+# One identity, two installations: THIS gpette serves only the owner (the other one serves everyone else).
+#   python tests/harness.py tests/scenarios/split_owner_side.toml
+[harness]
+step_timeout = 180
+no_reply_wait = 8
+
+[config.llm]
+provider = "claude-code"
+
+[config.claude_code]
+model = "haiku"
+max_turns = 2
+timeout_secs = 120
+workdir = "./workdir"
+allowed_tools = []
+
+[config.gate]
+kind = "none"                 # everyone else, groups included: the other installation answers
+
+[config.profiles.owner]
+members = ["inboxowner"]
+gate = "open"
+
+[files]
+"workdir/CLAUDE.md" = "You are a test bot. Reply with one short sentence."
+
+[[steps]]
+name = "owner answered"
+conversation = "conv_owner"
+sender = "inboxowner"
+text = "Say OWNERSIDE and nothing else."
+expect = [{contains = "OWNERSIDE"}]
+
+[[steps]]
+name = "stranger ignored"
+conversation = "conv_stranger"
+sender = "inboxstranger"
+text = "hello"
+expect = [{no_reply = true}]
+
+[[steps]]
+name = "group ignored"
+conversation = "conv_group"
+kind = "group"
+sender = "inboxstranger"
+text = "hello group"
+expect = [{no_reply = true}]

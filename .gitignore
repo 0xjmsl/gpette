@@ -1,0 +1,10 @@
+# Your settings and your bot's data never go in the repo.
+gpette.toml
+data/
+groups/
+workdir/
+profiles/
+__pycache__/
+*.pyc
+.venv/
+.env

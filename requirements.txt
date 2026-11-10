@@ -1,0 +1,14 @@
+# Python 3.11 or newer (the config loader uses the standard tomllib module).
+flask
+flask-cors
+flask-socketio
+requests
+APScheduler>=3.10
+Pillow
+numpy
+# LLM providers: install the ones you use. lmstudio needs nothing extra.
+anthropic            # provider "claude"
+openai               # provider "openai"
+google-genai         # provider "gemini"
+ollama               # provider "ollama"
+# Provider "claude-code" needs the Claude Code CLI ("claude") on PATH.

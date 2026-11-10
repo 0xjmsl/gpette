@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gpette</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+  <!-- Connection panel -->
+  <div class="connection-panel">
+    <input id="serverUrl" type="text" placeholder="Server URL" value="http://localhost:4849">
+    <input id="conversationId" type="text" placeholder="Conversation ID" value="">
+    <input id="senderInboxId" type="text" placeholder="Sender Inbox ID" value="">
+    <button class="btn" id="connectBtn" onclick="toggleConnection()">Connect</button>
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-text" id="statusText">Disconnected</span>
+  </div>
+
+  <!-- Auth banner -->
+  <div class="auth-banner" id="authBanner">
+    Inbox not let in yet. With the password gate, send the password (<code>[gate] password</code> in gpette.toml) first.
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('chat')">Chat</button>
+    <button class="tab-btn" onclick="switchTab('timers')">Timers</button>
+    <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
+  </div>
+
+  <!-- Chat tab -->
+  <div class="tab-content active" id="tab-chat">
+    <div class="messages" id="messages"></div>
+    <div class="input-bar">
+      <input id="msgInput" type="text" placeholder="Type a message..." onkeydown="if(event.key==='Enter')sendMessage()">
+      <button class="btn" onclick="sendMessage()">Send</button>
+    </div>
+  </div>
+
+  <!-- Timers tab -->
+  <div class="tab-content" id="tab-timers">
+    <div class="timers-panel">
+      <div class="timers-header">
+        <h2>Active Timers</h2>
+        <button class="btn btn-small" onclick="loadTimers()">Refresh</button>
+      </div>
+      <div class="timers-list" id="timersList">
+        <p class="timers-empty">Connect to a conversation to see timers.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings tab -->
+  <div class="tab-content" id="tab-settings">
+    <div class="settings-panel">
+      <h2>Runtime Configuration</h2>
+      <div class="settings-grid" id="settingsGrid">
+        <!-- populated by JS -->
+      </div>
+      <div class="settings-footer">
+        <button class="btn" onclick="saveSettings()">Save</button>
+        <span class="save-status" id="saveStatus"></span>
+      </div>
+      <p class="settings-note">Settings are saved to config_overrides.json in the data folder and persist across restarts.</p>
+    </div>
+  </div>
+
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+# gpette.toml: every setting in one place. Copy this file to gpette.toml and edit.
+# Secrets are NOT here: set ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY in the environment.
+# Relative paths are relative to this file's folder.
+
+[daemon]
+url = "http://127.0.0.1:3100"        # xmtp_daemon's local API
+
+[server]
+host = "127.0.0.1"                   # keep it local: the web UI and /api/config have no login
+port = 4849                          # xmtp_daemon's XMTP_WEBHOOK_URL points here
+data_dir = "./data"                  # database, logs, uploads
+read_receipts = true
+timer_check_secs = 60
+
+[storage]
+backend = "sqlite"                   # built in; other backends are plug-ins
+
+[llm]
+provider = "claude-code"             # claude-code | claude | openai | gemini | lmstudio | ollama
+lmstudio_host = "http://localhost:1234/v1"
+ollama_host = "http://localhost:11434"
+system_prompt_file = ""              # for API providers; empty = built-in prompt
+[llm.models]
+claude = "claude-sonnet-4-5"
+openai = "gpt-4.1"
+gemini = "gemini-flash-lite-latest"
+ollama = "qwen3"
+
+[claude_code]
+workdir = "./workdir"                # its CLAUDE.md is the bot's personality and rules
+allowed_tools = ["Read", "Glob", "Grep"]
+max_turns = 50
+timeout_secs = 3600
+privacy = true                       # bots never reveal paths, user names, machine or config details (per profile too)
+inherit_user_settings = false        # keep false: true loads YOUR personal CLAUDE.md, memory and permissions into the bot
+fenced_timeout_secs = 180            # no-tools runs (groups, allowed_tools = []) give up sooner: they can stall
+transcripts = false                  # true = write conversations/<person>/ files the bot can search (each run sees only its own)
+groups = "sandbox"                   # group chats in no profile: sandbox (empty folder, no tools) | default (the folder and tools above)
+group_workdir = "./groups"           # sandbox mode: one empty, tool-less folder per group chat
+
+[sessions]
+routing = "per_conversation"         # per_conversation | shared (every DM resumes one session)
+                                     # | per_account (one session per person, see owner_resolver)
+owner_resolver = ""                  # per_account: a module with owner_for(inbox_id) -> str | None
+                                     # (e.g. the account an inbox belongs to); empty = per inbox
+
+[filter]
+default = "answer"                   # who this gpette answers when no rule matches: answer | ignore
+# Rules are checked in order, before the gate; the first match wins. Use them when two
+# gpettes share one inbox (each answers its own people) or to mute someone.
+# [[filter.rules]]
+# name = "the owner's machine answers these"
+# action = "ignore"                  # answer | ignore
+# inboxes = ["<inbox id>"]          # a DM sender
+# accounts = ["0x<account>"]         # needs [sessions] owner_resolver
+# groups = ["<group conversation id>"]   # a group chat, by its id
+
+[gate]
+kind = "open"                        # open (answer everyone) | password | none (answer no one) | a plug-in module
+password = "password"                # with kind = "password": a stranger's first message must be exactly this
+welcome = "You are in. Say hello."   # the reply to the right password
+limit_reply = "No more new people today. Please try again tomorrow."
+new_people_per_day = 10              # how many new people the password can let in per day
+messages_per_person_per_day = 0      # 0 = no cap; applies to every gate
+
+[senders]
+resolver = ""                        # a module with resolve(inbox_id, address=None) -> name; empty = short inbox id
+
+[compaction]
+# Long chats with an API model keep a running summary (Claude Code keeps its own session
+# and is never touched). When more than `after` messages follow the summary, all but the
+# latest `keep` are folded into it in one call.
+provider = "same"                    # same (the chat's own model) | lm_studio | claude | openai | gemini | ollama | disabled
+after = 30
+keep = 10
+
+# Plug-ins (a gate, a storage backend, a sender resolver) read their own settings from
+# [plugins.<name>], with config.plugin_settings("<name>"). The plug-in documents its keys.
+# [plugins.my_gate]
+# allow_list = "./allowed.txt"
+
+# ---------------------------------------------------------------------------------------------
+# Profiles: give some people or groups their own environment. A message is matched by its
+# group chat id first, then by the sender's inbox id; anything unmatched uses the settings above.
+# Every key is optional; missing keys fall back to the sections above.
+# Keys: members, provider, model, workdir, allowed_tools ([] = no tools), system_prompt or
+# system_prompt_file (appended for Claude Code; the system prompt for API providers),
+# sessions (per_conversation | shared), gate, tools (Python tools for API providers),
+# max_turns, timeout_secs, privacy, inherit_user_settings. A group chat in no profile runs in its own empty folder under
+# [claude_code] group_workdir with no tools.
+#
+# [profiles.me]
+# members = ["<your inbox id>", "<a group conversation id>"]
+# provider = "claude-code"
+# workdir = "./profiles/me"           # its own CLAUDE.md
+# allowed_tools = ["Read", "Glob", "Grep", "Bash", "Edit", "Write"]
+#                                     # or ["*"]: every tool, permissions from the settings
+#                                     # files (owner-only; pairs with inherit_user_settings);
+#                                     # ["*", "Bash", "Edit"]: every tool, and those two approved outright
+# sessions = "shared"
+# gate = "open"
+#
+# [profiles.friends]
+# members = ["<inbox id>", "<group id>"]
+# provider = "lmstudio"
+# system_prompt_file = "./profiles/friends/prompt.txt"
+# tools = ["setTimer", "listTimers"]   # Python tools from ./tools this profile may call

@@ -1,0 +1,35 @@
+# [claude_code] groups = "default": a group in no profile gets the top-level folder and tools.
+#   python tests/harness.py tests/scenarios/groups_mode.toml
+[harness]
+step_timeout = 180
+no_reply_wait = 8
+
+[config.llm]
+provider = "claude-code"
+
+[config.claude_code]
+model = "haiku"
+max_turns = 6
+timeout_secs = 120
+workdir = "./kb"
+allowed_tools = ["Read", "Glob", "Grep"]
+groups = "default"
+
+[files]
+"kb/CLAUDE.md" = "You are a help bot. Answer from the files in your folder. Be brief."
+"kb/faq.md" = "The club meets on Thursdays. The code word is GUAVA."
+
+[[steps]]
+name = "group reads the knowledge folder"
+conversation = "g1"
+kind = "group"
+sender = "inboxany"
+text = "Check faq.md: what is the code word?"
+expect = [{contains = "GUAVA"}]
+
+[[steps]]
+name = "dm too"
+conversation = "d1"
+sender = "inboxany"
+text = "Check faq.md: when does the club meet?"
+expect = [{contains = "Thursday"}]
