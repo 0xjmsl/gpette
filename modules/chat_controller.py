@@ -206,10 +206,11 @@ class ChatController:
             # The saved summary always applies; a fold (a model call) never runs mid tool loop.
             conversation_history, context_note = compact_context(
                 conversation_history, service, conversation_id, self._conversation_db,
-                fold=message.get("role") != "tool")
+                fold=message.get("role") != "tool", profile=profile, incoming=message)
             system_prompt = self.get_system_prompt(profile)
             if context_note:
                 system_prompt = system_prompt + context_note
+                message['contextNote'] = context_note   # for Claude Code (no system prompt)
 
             # Enrich with sender identity (group prefixes or 1:1 name in system prompt)
             system_prompt = self._prepare_messages_with_sender_context(
@@ -351,9 +352,11 @@ class ChatController:
                     conversation_id, limit=Config.COMPACTION_AFTER + 20)
                 conversation_history = conversation_history[:-1] if conversation_history else []
                 conversation_history, context_note = compact_context(
-                    conversation_history, service, conversation_id, self._conversation_db)
+                    conversation_history, service, conversation_id, self._conversation_db,
+                    profile=profile, incoming=tool_return)
                 if context_note:
                     system_prompt = system_prompt + context_note
+                    tool_return['contextNote'] = context_note   # for Claude Code (no system prompt)
 
             # Get function declarations so the LLM can use tools in its response
             tools = self._tools_for(profile)

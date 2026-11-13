@@ -8,6 +8,7 @@ module must define a class `ConversationDB` with the same public methods, and
 import base64
 import importlib
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -692,15 +693,36 @@ class SQLiteConversationDB:
 
     _TIMER_COLS = "timer_id, conversation_id, description, instructions, timer_type, interval_seconds, fire_at, created_at, last_fired_at, status"
 
-    def create_timer(self, conversation_id, description, instructions, fire_at, timer_type='one_shot', interval_seconds=None):
-        """Create a new timer and return its timer_id"""
+    def create_timer(self, conversation_id, description, instructions, fire_at, timer_type='one_shot',
+                     interval_seconds=None, skip_session=False):
+        """Create a new timer and return its timer_id. skip_session: the fire
+        runs in a fresh session, without the chat's history."""
         timer_id = uuid.uuid4().hex[:8]
         created_at = int(time.time())
         self._execute("""
-        INSERT INTO timers (timer_id, conversation_id, description, instructions, timer_type, interval_seconds, fire_at, created_at, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
-        """, (timer_id, conversation_id, description, instructions, timer_type, interval_seconds, fire_at, created_at))
+        INSERT INTO timers (timer_id, conversation_id, description, instructions, timer_type, interval_seconds, fire_at, created_at, status, skip_session)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+        """, (timer_id, conversation_id, description, instructions, timer_type, interval_seconds, fire_at,
+              created_at, 1 if skip_session else 0))
         return timer_id
+
+    def last_human_sender(self, conversation_id):
+        """The inbox of the newest message a person sent in this conversation, or
+        None. A timer fire carries no sender; this is how it finds whose profile
+        to run in after a restart. It reads the whole conversation on purpose
+        (not the recent window, and not only what follows a reset): a chat that
+        is mostly timer fires can go hundreds of rows without a human message."""
+        try:
+            rows = self._query("""
+            SELECT sender_inbox_id FROM messages_v2
+            WHERE conversation_id = ? AND role = 'user'
+              AND sender_inbox_id IS NOT NULL AND sender_inbox_id != ''
+            ORDER BY timestamp DESC, id DESC LIMIT 1
+            """, (conversation_id,))
+            return rows[0]['sender_inbox_id'] if rows else None
+        except Exception as e:
+            logging.error(f"last_human_sender failed for {conversation_id}: {e}")
+            return None
 
     def get_timers_for_conversation(self, conversation_id, status='active'):
         """Get all timers for a conversation filtered by status"""
@@ -723,8 +745,8 @@ class SQLiteConversationDB:
             return None
 
     def update_timer(self, timer_id, **kwargs):
-        """Update timer fields (description, instructions, fire_at, timer_type, interval_seconds)"""
-        allowed = {'description', 'instructions', 'fire_at', 'timer_type', 'interval_seconds'}
+        """Update timer fields (description, instructions, fire_at, timer_type, interval_seconds, skip_session)"""
+        allowed = {'description', 'instructions', 'fire_at', 'timer_type', 'interval_seconds', 'skip_session'}
         updates = []
         params = []
         for key, value in kwargs.items():

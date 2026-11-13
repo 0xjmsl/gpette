@@ -28,6 +28,16 @@ def _local_only():
     return jsonify({"error": "local only"}), 403
 
 
+def _dropped(what, data):
+    """A handler raised (call this from the `except`). Answer 422, never a 5xx:
+    the daemon delivers in order and retries a 5xx with no limit, so one item
+    this bot cannot process would hold every message behind it. A 4xx tells
+    the daemon to drop it and move on. The traceback goes to the log."""
+    logging.exception(f"xmtp_http_bridge: {what} handler failed, DROPPED "
+                      f"(conversation {data.get('conversationId')}, id {str(data.get('id'))[:12]})")
+    return jsonify({"error": "handler failed, dropped"}), 422
+
+
 def register_routes(server, on_incoming, on_group_members):
     """Attach the two daemon -> gpette routes. The handlers are the existing
     socket.io handlers (handle_incoming_message / handle_group_members), so
@@ -41,7 +51,10 @@ def register_routes(server, on_incoming, on_group_members):
         data = request.get_json(silent=True)
         if not isinstance(data, dict) or not data.get("conversationId"):
             return jsonify({"error": "bad envelope"}), 400
-        on_incoming(data)
+        try:
+            on_incoming(data)
+        except Exception:
+            return _dropped("message", data)
         return jsonify({"ok": True})
 
     @server.route("/api/xmtp/group_members", methods=["POST"])
@@ -52,7 +65,10 @@ def register_routes(server, on_incoming, on_group_members):
         data = request.get_json(silent=True)
         if not isinstance(data, dict):
             return jsonify({"error": "bad body"}), 400
-        on_group_members(data)
+        try:
+            on_group_members(data)
+        except Exception:
+            return _dropped("group_members", data)
         return jsonify({"ok": True})
 
     logging.info("xmtp_http_bridge: routes registered (/api/xmtp/incoming, /api/xmtp/group_members)")

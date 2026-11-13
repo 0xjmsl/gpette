@@ -67,12 +67,26 @@ messages_per_person_per_day = 0      # 0 = no cap; applies to every gate
 resolver = ""                        # a module with resolve(inbox_id, address=None) -> name; empty = short inbox id
 
 [compaction]
-# Long chats with an API model keep a running summary (Claude Code keeps its own session
-# and is never touched). When more than `after` messages follow the summary, all but the
-# latest `keep` are folded into it in one call.
+# Every long chat keeps one running summary, so the model reads the summary plus the
+# latest messages instead of everything.
+# API models: when more than `after` messages follow the summary, all but the latest
+# `keep` are folded into it in one call.
 provider = "same"                    # same (the chat's own model) | lm_studio | claude | openai | gemini | ollama | disabled
 after = 30
-keep = 10
+keep = 10                            # the latest messages kept word for word (both kinds of chat)
+
+# Claude Code chats: the trigger is the size of the session, read after each run. From
+# `topic_tokens` on, each new message is checked with one short call: a new subject cuts.
+# From `force_tokens` on, the next message cuts. A cut folds the chat log into the summary
+# (one call) and drops the session; the next session starts with the summary and the
+# latest `keep` messages. With provider = "same" the two calls are one-shot `claude` runs
+# on `model`, with no session and no tools. Keep both sizes under the context window of
+# the chat's model; 0 turns that trigger off. `/compact` cuts at any size.
+[compaction.claude_code]
+model = "sonnet"
+topic_tokens = 300000
+force_tokens = 400000
+summary_words = 1000
 
 # Plug-ins (a gate, a storage backend, a sender resolver) read their own settings from
 # [plugins.<name>], with config.plugin_settings("<name>"). The plug-in documents its keys.
@@ -86,7 +100,7 @@ keep = 10
 # Keys: members, provider, model, workdir, allowed_tools ([] = no tools), system_prompt or
 # system_prompt_file (appended for Claude Code; the system prompt for API providers),
 # sessions (per_conversation | shared), gate, tools (Python tools for API providers),
-# max_turns, timeout_secs, privacy, inherit_user_settings. A group chat in no profile runs in its own empty folder under
+# max_turns, timeout_secs, privacy, inherit_user_settings, admin, on_error (describe | generic), error_reply. A group chat in no profile runs in its own empty folder under
 # [claude_code] group_workdir with no tools.
 #
 # [profiles.me]
@@ -99,9 +113,11 @@ keep = 10
 #                                     # ["*", "Bash", "Edit"]: every tool, and those two approved outright
 # sessions = "shared"
 # gate = "open"
+# admin = true                       # /menu (model, timers, session, status) + errors in full
 #
 # [profiles.friends]
 # members = ["<inbox id>", "<group id>"]
 # provider = "lmstudio"
 # system_prompt_file = "./profiles/friends/prompt.txt"
 # tools = ["setTimer", "listTimers"]   # Python tools from ./tools this profile may call
+# error_reply = "Not available right now, back soon."   # what they see if the model fails

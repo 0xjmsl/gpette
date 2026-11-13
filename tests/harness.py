@@ -34,6 +34,7 @@ Checks (text checks are case-insensitive; a list for contains / not_contains mea
     denied_tool = "Read"                   a run summary lists a denied call of that tool
     no_denied = true                       no denied tool call
     max_cost_usd = 0.05                    the step's runs cost at most this
+    log_not_contains = "KIWI"              what gpette logged during the step does not hold it
 
 Strings in checks may use {tmp} (the temp folder), {tmp_name} (its folder name),
 {user} (this machine's user name) and {home} (the user's home folder).
@@ -342,7 +343,17 @@ def _as_list(v):
     return v if isinstance(v, list) else [v]
 
 
-def evaluate(expect, reply, runs, subs):
+def read_log(log_path, offset):
+    """What gpette wrote to its log after `offset`."""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(offset)
+            return f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def evaluate(expect, reply, runs, subs, log_text=""):
     """Returns a list of failure strings (empty = pass)."""
     fails = []
     low = reply.lower()
@@ -375,6 +386,10 @@ def evaluate(expect, reply, runs, subs):
             elif kind == "no_denied":
                 if val and denied:
                     fails.append(f"denied {denied}")
+            elif kind == "log_not_contains":
+                for s in _as_list(val):
+                    if sub(s).lower() in log_text.lower():
+                        fails.append(f"log has '{sub(s)}'")
             elif kind == "max_cost_usd":
                 if cost > float(val):
                     fails.append(f"cost {cost:.4f} > {val}")
@@ -430,7 +445,7 @@ def run(scenario_path, keep=False, only=None):
             reply = "\n".join(b["content"] if isinstance(b.get("content"), str)
                               else json.dumps(b.get("content")) for b in bodies)
             runs = read_summaries(log_path, offset, step["conversation"])
-            fails = evaluate(expect, reply, runs, subs)
+            fails = evaluate(expect, reply, runs, subs, read_log(log_path, offset))
             if not bodies and not wants_silence:
                 fails.insert(0, "timeout: no reply")
             results.append({"name": name, "ok": not fails, "fails": fails, "reply": reply,

@@ -1,4 +1,6 @@
 import time
+
+from modules import admin_menu
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -92,6 +94,11 @@ class ProactiveSystem:
                 self.conversation_db.advance_recurring_timer(timer_id, interval_seconds)
             else:
                 self.conversation_db.mark_timer_fired(timer_id)
+
+            # Paused from /menu: the timer keeps its schedule but doesn't fire.
+            if admin_menu.timers_paused():
+                logging.info(f"ProactiveSystem: timers paused, '{timer_id}' skipped")
+                continue
 
             # Build proactive message with timer context
             proactive_message = {

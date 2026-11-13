@@ -135,12 +135,20 @@ class Config:
     FILTER = {}
 
     # --- context compaction -----------------------------------------------------------
-    # API models only (Claude Code keeps its own session). See modules/context_compactor.py.
+    # See modules/context_compactor.py. API models: a fold by message count.
+    # Claude Code: a cut by the size of the session's context.
     COMPACTION_PROVIDER = 'same'               # same | lm_studio | claude | openai | gemini | ollama | disabled
     COMPACTION_MODEL = ''                      # with a named provider: its model; empty = its cheapest default
     COMPACTION_AFTER = 30                      # fold when more than this many messages follow the summary
     COMPACTION_KEEP = 10                       # the latest messages a fold leaves word for word
     COMPACTION_SUMMARY_TOKENS = 600
+    # Claude Code chats ([compaction.claude_code]). A cut = the chat log is folded
+    # into the summary and the session is dropped; the next one starts from the
+    # summary plus the latest `keep` messages. 0 turns a threshold off.
+    COMPACTION_CC_MODEL = 'sonnet'             # the model of the one-shot calls (provider = same)
+    COMPACTION_CC_TOPIC_TOKENS = 300000        # from this context size, a new topic cuts
+    COMPACTION_CC_FORCE_TOKENS = 400000        # from this context size, the next message cuts
+    COMPACTION_CC_SUMMARY_WORDS = 1000
 
     # --- semantic memory (optional) ---------------------------------------------------
     MEMORY_ENABLED = False
@@ -195,6 +203,7 @@ _MAP = {
     'claude_code.privacy': ('PRIVACY', False),
     'claude_code.inherit_user_settings': ('CLAUDE_CODE_INHERIT_USER_SETTINGS', False),
     'claude_code.system_prompt': ('CLAUDE_CODE_SYSTEM_PROMPT', False),
+    'claude_code.error_reply': ('ERROR_REPLY', False),
     'claude_code.group_workdir': ('CLAUDE_CODE_GROUP_CWD', True),
     'claude_code.group_system_prompt': ('CLAUDE_CODE_GROUP_SYSTEM_PROMPT', False),
     'sessions.routing': ('SESSION_ROUTING', False),
@@ -212,6 +221,10 @@ _MAP = {
     'compaction.after': ('COMPACTION_AFTER', False),
     'compaction.keep': ('COMPACTION_KEEP', False),
     'compaction.summary_tokens': ('COMPACTION_SUMMARY_TOKENS', False),
+    'compaction.claude_code.model': ('COMPACTION_CC_MODEL', False),
+    'compaction.claude_code.topic_tokens': ('COMPACTION_CC_TOPIC_TOKENS', False),
+    'compaction.claude_code.force_tokens': ('COMPACTION_CC_FORCE_TOKENS', False),
+    'compaction.claude_code.summary_words': ('COMPACTION_CC_SUMMARY_WORDS', False),
     'memory.enabled': ('MEMORY_ENABLED', False),
     'memory.embedding_provider': ('MEMORY_EMBEDDING_PROVIDER', False),
     'memory.embedding_model': ('MEMORY_EMBEDDING_MODEL', False),
@@ -295,6 +308,8 @@ OVERRIDE_TYPES = {
     'OLLAMA_HOST': str, 'LM_STUDIO_HOST': str,
     'COMPACTION_PROVIDER': str, 'COMPACTION_MODEL': str,
     'COMPACTION_AFTER': int, 'COMPACTION_KEEP': int, 'COMPACTION_SUMMARY_TOKENS': int,
+    'COMPACTION_CC_MODEL': str, 'COMPACTION_CC_TOPIC_TOKENS': int,
+    'COMPACTION_CC_FORCE_TOKENS': int, 'COMPACTION_CC_SUMMARY_WORDS': int,
     'PROACTIVE_CHECK_INTERVAL': int, 'SEND_READ_RECEIPTS': _b,
     'MEMORY_ENABLED': _b, 'MEMORY_EMBEDDING_PROVIDER': str, 'MEMORY_EMBEDDING_MODEL': str,
     'MEMORY_MAX_RESULTS': int, 'MEMORY_MIN_SCORE': float, 'MEMORY_CHUNK_TOKENS': int, 'MEMORY_INDEX_DEBOUNCE': int,
@@ -322,6 +337,11 @@ def validate_compaction_config():
         raise ValueError(f"compaction.provider='{p}' is not valid. Must be one of: {sorted(valid)}")
     if not (1 <= Config.COMPACTION_KEEP < Config.COMPACTION_AFTER):
         raise ValueError("compaction: keep must be at least 1 and less than after")
+    topic, force = Config.COMPACTION_CC_TOPIC_TOKENS, Config.COMPACTION_CC_FORCE_TOKENS
+    if topic < 0 or force < 0 or (topic and force and topic >= force):
+        raise ValueError("compaction.claude_code: topic_tokens must be below force_tokens (0 turns one off)")
+    if Config.COMPACTION_CC_SUMMARY_WORDS < 50:
+        raise ValueError("compaction.claude_code: summary_words must be at least 50")
     if p == 'claude' and not Config.ANTROKEY:
         raise ValueError("compaction.provider=claude needs ANTHROPIC_API_KEY")
     if p == 'openai' and not Config.OPENAI_API_KEY:

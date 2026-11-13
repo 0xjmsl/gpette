@@ -44,9 +44,9 @@ class BaseLLMService(ABC):
         return None instead. Callers (e.g. ContextCompactor) react to None
         with their own fallback policy.
 
-        Implementations that fundamentally cannot quick_call (e.g. subprocess
-        CLI wrappers like ClaudeCodeService) should raise NotImplementedError.
-        Resolvers must avoid routing quick_call to such services.
+        ClaudeCodeService answers with a one-shot `claude` run (no session, no
+        tools). The CLI takes no token limit, so there `max_tokens` is not
+        enforced: the prompt has to state the length it wants.
         """
         pass
 

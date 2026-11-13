@@ -1,0 +1,90 @@
+# Compaction of a Claude Code chat: a cut folds the chat log into the summary and drops
+# the session; the next session starts with the summary and the latest message(s), so
+# what was said survives. /compact cuts on request, /reset starts clean.
+#   python tests/harness.py tests/scenarios/compaction.toml --keep
+# Needs the Claude Code CLI signed in. The bot is haiku, the summary calls are sonnet.
+# topic_tokens = 1 makes every message of a running session go through the topic check;
+# the replies below must hold whether it answers SAME or NEW. To see what it did, keep
+# the temp folder and look for [ContextCompactor] in data/logs/app.log.
+
+[harness]
+step_timeout = 240
+no_reply_wait = 8
+
+[config.llm]
+provider = "claude-code"
+
+[config.claude_code]
+model = "haiku"
+max_turns = 4
+timeout_secs = 180
+workdir = "./workdir"
+allowed_tools = []
+
+[config.compaction]
+provider = "same"
+keep = 1
+
+[config.compaction.claude_code]
+topic_tokens = 1
+force_tokens = 10000000
+summary_words = 100
+
+[files]
+"workdir/CLAUDE.md" = "You are a test bot. Be brief."
+
+[[steps]]
+name = "a fact"
+conversation = "c1"
+sender = "inbox1"
+text = "Remember this: the code word is MANGO-17. Just say OK."
+expect = [{contains = "OK"}]
+
+[[steps]]
+name = "same subject"
+conversation = "c1"
+sender = "inbox1"
+text = "And the backup code word is PAPAYA-4. Just say OK."
+expect = [{contains = "OK"}]
+
+[[steps]]
+name = "another subject"
+conversation = "c1"
+sender = "inbox1"
+text = "Something else entirely: I am planning a hiking trip. Name one mountain range in Europe, in one word."
+expect = [{not_contains = "MANGO"}]
+
+[[steps]]
+name = "facts survive"
+conversation = "c1"
+sender = "inbox1"
+text = "Back to the code words: what are the code word and the backup code word?"
+expect = [{contains = ["MANGO-17", "PAPAYA-4"]}]
+
+[[steps]]
+name = "compact on request"
+conversation = "c1"
+sender = "inbox1"
+text = "/compact"
+expect = [{contains = "Compacted (asked"}, {max_cost_usd = 0.0}]
+
+[[steps]]
+name = "facts survive it"
+conversation = "c1"
+sender = "inbox1"
+text = "Once more, both code words?"
+expect = [{contains = ["MANGO-17", "PAPAYA-4"]}]
+
+[[steps]]
+name = "reset"
+conversation = "c1"
+sender = "inbox1"
+text = "/reset"
+expect = [{contains = "cleared"}]
+
+[[steps]]
+name = "clean after reset"
+conversation = "c1"
+sender = "inbox1"
+text = "What is the code word? If you do not know it, answer UNKNOWN."
+expect = [{not_contains = ["MANGO", "PAPAYA"]}]

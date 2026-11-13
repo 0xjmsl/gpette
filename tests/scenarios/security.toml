@@ -53,6 +53,15 @@ gate = "open"
 "work/open/secret.txt" = "The secret word is MANGO."
 
 # --- a) seer --------------------------------------------------------------------------
+# Before the filter and the gate, the log holds the shape of a message and never its
+# text: what a stranger wrote (stopped by the gate) is not in app.log.
+[[steps]]
+name = "a stranger's text is not logged"
+conversation = "conv_stranger"
+sender = "inboxstranger"
+text = "KIWIFRUIT is not the password"
+expect = [{no_reply = true}, {log_not_contains = "KIWIFRUIT"}]
+
 [[steps]]
 name = "seer picture"
 conversation = "conv_seer"

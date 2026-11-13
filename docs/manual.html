@@ -168,7 +168,9 @@ XMTP_WEBHOOK_URL=http://127.0.0.1:4849 ./xmtp_daemon</code></pre>
   <li><b>Tool loop</b> (API models only): a tool call runs a Python tool and its result goes back to the model, up to 50 rounds.</li>
   <li><b>Reply</b>: stored, then sent through the daemon.</li>
 </ol>
-<p><b>Compaction</b> (<code>[compaction]</code>, on by default, API models only; Claude Code keeps its own session and is never touched): each chat keeps one running summary. When more than <code>after</code> messages (30) follow it, all but the latest <code>keep</code> (10) are folded into the summary in one call, made by the chat's own model (<code>provider = "same"</code>) or by the one you name. The model sees the summary plus the recent messages word for word, so a long chat costs one extra call every 20 or so messages. A reset clears the summary; <code>provider = "disabled"</code> turns it off.</p>
+<p><b>Compaction</b> (<code>[compaction]</code>, on by default): each chat keeps one running summary. A reset clears it; <code>provider = "disabled"</code> turns it off.</p>
+<p><i>API models:</i> when more than <code>after</code> messages (30) follow the summary, all but the latest <code>keep</code> (10) are folded into it in one call, made by the chat's own model (<code>provider = "same"</code>) or by the one you name. The model sees the summary plus the recent messages word for word, so a long chat costs one extra call every 20 or so messages.</p>
+<p><i>Claude Code</i> (<code>[compaction.claude_code]</code>): the trigger is the size of the session, read after each run. From <code>topic_tokens</code> (300,000) on, one short call checks each new message, and a new subject cuts. From <code>force_tokens</code> (400,000) on, the next message cuts. A cut folds gpette's log of the chat into the summary (up to <code>summary_words</code>, 1,000) and drops the session; the next one starts with the summary and the latest <code>keep</code> messages. With <code>provider = "same"</code> both calls are one-shot <code>claude</code> runs on <code>model</code> (Sonnet), with no session and no tools. A failed summary call cuts nothing. <code>/compact</code> cuts at any size.</p>
 
 <h2 id="config">4. The config file</h2>
 <p>Everything is in <code>gpette.toml</code>. <b>API keys never go in it</b>: they come from the environment. Paths are relative to the file.</p>
@@ -182,7 +184,7 @@ XMTP_WEBHOOK_URL=http://127.0.0.1:4849 ./xmtp_daemon</code></pre>
 <tr><td><code>[filter]</code></td><td>who this gpette answers (rules)</td></tr>
 <tr><td><code>[gate]</code></td><td>who may talk: <code>kind</code>, <code>password</code>, caps</td></tr>
 <tr><td><code>[senders]</code></td><td>a module that turns inbox ids into names</td></tr>
-<tr><td><code>[compaction]</code></td><td>running summaries for long chats (API models)</td></tr>
+<tr><td><code>[compaction]</code></td><td>running summaries for long chats; <code>[compaction.claude_code]</code> for Claude Code sessions</td></tr>
 <tr><td><code>[storage]</code></td><td><code>sqlite</code> (built in) or a plug-in</td></tr>
 <tr><td><code>[profiles.&lt;name&gt;]</code></td><td>an environment for listed people or groups</td></tr>
 <tr><td><code>[plugins.&lt;name&gt;]</code></td><td>settings your plug-ins read</td></tr>

@@ -37,9 +37,10 @@ Notes for AI agents that set up, run or extend gpette. Read README.md first for 
 | Where did a message go? | `http://127.0.0.1:<port>/admin` (this machine only): each conversation's filter rule, profile, gate decision and session; the "who would handle this?" box predicts it without sending. Raw: `<data_dir>/routes.jsonl`. |
 | A message is ignored with no gate line in the log | Look for `Filter: ignored … (<rule>)`: a `[filter]` rule (or `default = "ignore"`) dropped it before the gate. Expected when another installation of the same inbox serves that person. |
 | Two machines on one inbox both answer, or neither | Their `[filter]` rules overlap or leave a gap. Each person must hit `answer` on exactly one side; groups are matched by group id only. SETUPS.md § 2. |
+| A Claude Code bot lost detail in a long chat | Its session was cut: look for `[ContextCompactor]` in the log (`Compacted (<forced, new topic or asked>, N tokens)`). It restarted with a summary and the latest 10 messages. Sizes: `[compaction.claude_code]`; `/status` on an admin profile shows the session size and the summary. |
 | The bot can't find an old chat after a reset | `transcripts = true` writes them to `<workdir>/conversations/<person>/`; the bot needs Read/Glob/Grep. Each run sees only its own person's folder. |
 
-Logs: `data/logs/app.log`, and the `server_logs` table in `data/gpette.db`. Each Claude Code run logs one `run summary` line: profile, turns, cost and every tool call the permissions denied.
+Logs: `data/logs/app.log`, and the `server_logs` table in `data/gpette.db`. An incoming message is logged as `Standardize message input: conversation=… sender=… kind=… type=… size=…`; its text appears only after the filter and the gate let it through, so what a stranger wrote is never in the log. Each Claude Code run logs one `run summary` line: profile, turns, cost and every tool call the permissions denied.
 
 To check a config without XMTP, run a scenario: `python tests/harness.py tests/scenarios/security.toml --keep`. It starts a fake daemon and gpette in a temp folder, sends each step and checks the reply (see the top of `tests/harness.py` for the format). With `--keep`, the temp folder keeps `gpette.toml`, `data/logs/app.log` and `gpette_stdout.log` for a failed step. Write a scenario for a profile before you trust its fences.
 
@@ -65,5 +66,5 @@ Your module must be importable: install it, or run gpette with it on `PYTHONPATH
 - One session per conversation by default. `sessions.routing = "shared"` puts every DM into one session.
 - Claude Code runs with `--permission-mode dontAsk` and only the tools in `allowed_tools`.
 - Claude Code lets Read, Glob and Grep see the whole working folder without a rule. So when one of them is allowed only with a scope, like `Read(./images/**)`, gpette also denies it on every other top-level entry of the folder. Images a user sends are saved to `<workdir>/images`.
-- Python tools work with API providers only, not with Claude Code.
+- Python tools work with API providers only, not with Claude Code. Timers for a Claude Code bot: `python scripts/timer.py` (set, list, edit, cancel, conversations), with Bash allowed on that profile. Put the commands in the profile's `CLAUDE.md` so the bot knows them.
 - Images up to about 1 MB are passed to the model. Larger ones are compressed or replaced by a note.

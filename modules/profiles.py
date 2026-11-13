@@ -27,6 +27,9 @@ Every profile key is optional and falls back to the top-level value:
     privacy             true = never reveal paths, user names, machine or config details
     inherit_user_settings   true = load the host user's Claude Code settings, CLAUDE.md and
                         memory (owner-only; default from [claude_code], never for groups)
+    admin               true = /menu (model, timers, session, status) and full error text
+    on_error            describe | generic (default: describe for admin, else generic)
+    error_reply         generic: what people see when the model fails
 
 Defaults are read from Config at resolve time, so runtime edits apply.
 """
@@ -37,6 +40,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from config import Config, ALL_CLAUDE_TOOLS
+from modules import admin_menu
 
 DEFAULT = 'default'
 GROUP = 'group'
@@ -63,6 +67,9 @@ class Profile:
     inherit_user_settings: bool = False   # load the host user's Claude Code settings/CLAUDE.md/memory
     session_owner: str = ''               # per_account: who this message's session belongs to
     transcripts: bool = False             # write conversations/<owner>/ files the bot can read (modules/transcripts.py)
+    admin: bool = False                   # /menu, and errors described in full (modules/admin_menu.py)
+    on_error: str = 'generic'             # describe | generic: how a failed model run is answered
+    error_reply: str = ''                 # generic: the text sent ('' = the built-in one)
 
     def session_key(self, conversation_id):
         """Where this conversation's Claude Code session id is stored."""
@@ -143,7 +150,8 @@ def _base(name, is_group):
         p.sessions = Config.SESSION_ROUTING or 'per_conversation'
     if Config.SYSTEM_PROMPT_FILE:
         p.system_prompt = _read_file(Config.SYSTEM_PROMPT_FILE)
-    return p
+    p.error_reply = str(getattr(Config, 'ERROR_REPLY', '') or '')
+    return admin_menu.apply_overrides(p)
 
 
 def _from_config(name, raw):
@@ -190,7 +198,14 @@ def _from_config(name, raw):
     if p.sessions not in ('per_conversation', 'shared', 'per_account'):
         logging.warning(f"profile '{name}': sessions='{p.sessions}' unknown, using per_conversation")
         p.sessions = 'per_conversation'
-    return p
+    if 'admin' in raw:
+        p.admin = bool(raw['admin'])
+    p.on_error = str(raw.get('on_error') or ('describe' if p.admin else 'generic')).strip()
+    if p.on_error not in ('describe', 'generic'):
+        logging.warning(f"profile '{name}': on_error='{p.on_error}' unknown, using generic")
+        p.on_error = 'generic'
+    p.error_reply = str(raw.get('error_reply') or '')
+    return admin_menu.apply_overrides(p)
 
 
 def base_profile(is_group):
@@ -301,10 +316,7 @@ def profile_for_conversation(conversation_id, kind=None, conversation_db=None):
     sender = None
     if kind != 'group' and conversation_db is not None:
         try:
-            for msg in reversed(conversation_db.get_conversation_history(conversation_id, limit=50) or []):
-                if msg.get('role') == 'user' and msg.get('senderInboxId'):
-                    sender = msg['senderInboxId']
-                    break
+            sender = conversation_db.last_human_sender(conversation_id)
         except Exception as e:
             logging.error(f"profiles: history lookup failed for {conversation_id}: {e}")
     return resolve_profile(conversation_id, sender, kind or 'dm')

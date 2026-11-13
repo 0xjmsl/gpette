@@ -14,6 +14,8 @@ from utils.message_logger import log_message_flow
 from modules.thread_joins import get_group
 from modules.profiles import base_profile, workdir_for
 from modules import transcripts
+from modules import admin_menu
+from modules import context_compactor
 
 # Both live under the data folder (server.data_dir in gpette.toml).
 SESSIONS_FILE = os.path.join(Config.DATA_DIR, "claude_sessions.json")
@@ -28,8 +30,9 @@ class ClaudeCodeService(BaseLLMService):
     — it just forwards the user message and parses the response.
 
     Session IDs are persisted to claude_sessions.json so they survive server
-    restarts. Thread-joined conversations share the same session. When starting
-    a new session (no resume), the last 4 DB messages are prepended as context.
+    restarts. Thread-joined conversations share the same session. A new session
+    (no resume) starts with what modules/context_compactor.py hands over: the
+    summary of the earlier conversation and the latest messages.
     """
 
     MAX_EMPTY_RETRIES = 3
@@ -71,28 +74,19 @@ class ClaudeCodeService(BaseLLMService):
 
     # --- Context injection for new sessions ---
 
-    def _build_context(self, conversation_history):
-        """Format the last 4 messages as context for a new session."""
-        if not conversation_history:
+    def _build_context(self, conversation_history, note=""):
+        """What a new session starts with, ahead of the message: the summary of
+        the earlier conversation (`note`) and the latest chat messages, word for
+        word. Both come from modules/context_compactor.py."""
+        recent = [line for line in context_compactor.chat_lines(conversation_history)
+                  if line[0] != "timer"][-max(1, Config.COMPACTION_KEEP):]
+        parts = [note] if note else []
+        if recent:
+            parts.append("\n".join(["[Recent conversation context:]"] + [
+                f"[{role}]: {text[:1500]}" for role, text, _ in recent]))
+        if not parts:
             return ""
-
-        recent = conversation_history[-4:]
-        lines = ["[Recent conversation context:]"]
-        for msg in recent:
-            role = msg.get("role", "unknown")
-            # Skip tool-call/tool-return noise
-            if role == "tool":
-                continue
-            content = msg.get("content", "")
-            if isinstance(content, dict):
-                content = content.get("value", "") or content.get("text", "")
-            if not content or content in ("PROACTIVE_TRIGGER", "TIMER_TRIGGER"):
-                continue
-            lines.append(f"[{role}]: {content}")
-
-        if len(lines) <= 1:
-            return ""
-        return "\n".join(lines) + "\n\n---\n\n"
+        return "\n\n".join(parts) + "\n\n---\n\n"
 
     # --- Image handling ---
 
@@ -114,19 +108,22 @@ class ClaudeCodeService(BaseLLMService):
             f.write(base64.b64decode(base64_data))
         return filepath
 
-    # --- Reset trigger ---
+    # --- Session commands ---
 
-    _RESET_TRIGGERS = {"reset conversation", "fresh start", "new session", "/reset"}
+    def _session_command(self, message_data: dict, profile=None) -> Optional[str]:
+        """A message that acts on the session instead of going to the model
+        (context_compactor.command_of). Returns the fixed answer, or None.
 
-    def _check_reset_trigger(self, message_data: dict, profile=None) -> bool:
-        """Check if the message is a session reset command. If so, clear and return True."""
-        content = message_data.get("content")
-        if isinstance(content, dict):
-            content = content.get("value", "")
-        if isinstance(content, str) and content.strip().lower() in self._RESET_TRIGGERS:
+        reset: the session is dropped here; the compactor already emptied the
+        summary. compact: the compactor already cut (or said why not) before
+        this ran, and left its report on the message."""
+        command = context_compactor.command_of(message_data)
+        if command == "reset":
             self.clear_session(message_data.get("conversationId", "unknown"), profile)
-            return True
-        return False
+            return context_compactor.RESET_REPLY
+        if command == "compact":
+            return message_data.get("compactReport") or context_compactor.COMPACT_OFF_REPLY
+        return None
 
     # --- Core ---
 
@@ -147,11 +144,12 @@ class ClaudeCodeService(BaseLLMService):
                 f"called something else, use that.") if sender_name and not is_group else ""
         session_key = profile.session_key(conversation_id)
 
-        # Reset session trigger — handle before any processing
-        if self._check_reset_trigger(message_data, profile):
+        # A session command (/reset, /compact) is answered here, without a model turn
+        command_reply = self._session_command(message_data, profile)
+        if command_reply:
             return {
                 "role": "assistant",
-                "content": {"type": "text", "value": "Session cleared. Next message starts fresh."},
+                "content": {"type": "text", "value": command_reply},
                 "timestamp": timestamp,
                 "conversationId": conversation_id,
                 "tool_calls": None,
@@ -203,23 +201,27 @@ class ClaudeCodeService(BaseLLMService):
             session_id = self._find_session(conversation_id, profile)
             is_new = session_id is None
 
-        # Prepend recent history as context when starting fresh (not skip_session)
+        # A new session starts with the summary and the latest messages (not skip_session)
+        context_note = message_data.get("contextNote") or ""
         if is_new:
-            context = self._build_context(conversation_history)
+            context = self._build_context(conversation_history, context_note)
             if context:
                 text = context + text
 
+        is_timer = message_data.get("source") == "ProactiveSystem"
         try:
             result = self._run_claude(text, conversation_id, session_id, profile=profile, note=note)
         except Exception as e:
-            if session_id:
-                # Stale session — clear and retry without resume
+            # Only a stale session is worth dropping and retrying fresh. A usage
+            # limit, an overload or a dead login says nothing about the session,
+            # and dropping it loses the conversation's memory (2026-11-10).
+            if session_id and admin_menu.is_stale_session(str(e)):
                 logging.warning(f"ClaudeCodeService: resume failed ({e}), retrying fresh")
                 self.clear_session(conversation_id, profile)
                 if is_new:
                     pass  # context already prepended
                 else:
-                    context = self._build_context(conversation_history)
+                    context = self._build_context(conversation_history, context_note)
                     if context:
                         text = context + text
                 try:
@@ -227,13 +229,13 @@ class ClaudeCodeService(BaseLLMService):
                 except Exception as e2:
                     logging.error(f"ClaudeCodeService: retry also failed for conv={conversation_id}: {e2}")
                     log_message_flow("ClaudeCodeService", "SYSTEM", "error", conversation_id, str(e2))
-                    return self._create_error_response(
-                        "Claude error", conversation_id, timestamp)
+                    return self._failure_response(profile, conversation_id, str(e2), is_timer, timestamp)
             else:
-                logging.error(f"ClaudeCodeService: first attempt failed for conv={conversation_id}: {e}")
+                logging.error(f"ClaudeCodeService: run failed for conv={conversation_id}: {e}")
                 log_message_flow("ClaudeCodeService", "SYSTEM", "error", conversation_id, str(e))
-                return self._create_error_response(
-                    "Claude error", conversation_id, timestamp)
+                return self._failure_response(profile, conversation_id, str(e), is_timer, timestamp)
+
+        back = admin_menu.note_success(profile, conversation_id, result, throwaway=skip_session)
 
         # Don't save the throwaway session when skip_session — preserve original
         new_session_id = result.get("session_id")
@@ -281,11 +283,16 @@ class ClaudeCodeService(BaseLLMService):
                         conversation_id, timestamp)
             except Exception as e:
                 logging.error(f"ClaudeCodeService: retry after empty also failed: {e}")
-                return self._create_error_response(
-                    "Claude error", conversation_id, timestamp)
+                return self._failure_response(profile, conversation_id, str(e), is_timer, timestamp)
 
         # Successful non-empty response — reset empty counter
         self._empty_counters.pop(conversation_id, None)
+
+        # A failure streak just ended: say so first. A quiet timer reply
+        # ([NO_REPLY]) becomes just that line.
+        if back:
+            quiet = response_text.strip().strip("`*\"' .").upper() in ("[NO_REPLY]", "NO_REPLY")
+            response_text = back if quiet else f"{back}\n\n{response_text}"
 
         return {
             "role": "assistant",
@@ -295,6 +302,15 @@ class ClaudeCodeService(BaseLLMService):
             "tool_calls": None,
             "token_count": usage.get("output_tokens", 0)
         }
+
+    def _failure_response(self, profile, conversation_id, reason, is_timer, timestamp):
+        """A failed run, answered per profile (modules/admin_menu.py): the full
+        reason on admin profiles, a general line elsewhere, and only once per
+        failure streak on timer fires ([NO_REPLY] = nothing is sent)."""
+        text = admin_menu.error_reply(profile, conversation_id, reason, is_timer)
+        if text is None:
+            text = "[NO_REPLY]"
+        return self._create_error_response(text, conversation_id, timestamp)
 
     @staticmethod
     def _timeout_for(profile):
@@ -458,9 +474,11 @@ class ClaudeCodeService(BaseLLMService):
         if prompt:
             cmd += ["--append-system-prompt", prompt]
 
-        # -p <text> MUST be last — prevents text starting with dashes
-        # from being parsed as CLI flags
-        cmd += ["-p", text]
+        # The message goes in on stdin, not as an argument: a new session's
+        # opening (summary + latest messages + the message) can pass the 32,767
+        # characters Windows allows a command line, and text starting with
+        # dashes can never be read as a flag.
+        cmd += ["-p"]
 
         cwd = workdir_for(profile, conversation_id)
 
@@ -470,10 +488,14 @@ class ClaudeCodeService(BaseLLMService):
 
         result = subprocess.run(
             cmd,
+            input=text,
             capture_output=True,
             text=True,
             encoding="utf-8",
             cwd=cwd,
+            # scripts/timer.py reads this, so a bot that may run it sets timers
+            # in the chat it is answering without knowing the id.
+            env={**os.environ, "GPETTE_CONVERSATION_ID": str(conversation_id or "")},
             timeout=self._timeout_for(profile)
         )
 
@@ -498,7 +520,18 @@ class ClaudeCodeService(BaseLLMService):
                 f"--- stderr ---\n{stderr[:2000]}\n"
                 f"--- stdout ---\n{stdout[:4000]}"
             )
-            raise RuntimeError(f"claude exited {result.returncode}: {stderr}")
+            # claude often reports the reason only in its JSON result
+            # (usage limit, auth, API error) and leaves stderr empty.
+            reason = stderr
+            if not reason:
+                try:
+                    body = json.loads(stdout)
+                    reason = " ".join(str(x) for x in (
+                        body.get("api_error_status"), body.get("api_error"),
+                        body.get("result")) if x)
+                except (json.JSONDecodeError, AttributeError):
+                    reason = stdout[:300]
+            raise RuntimeError(f"claude exited {result.returncode}: {reason}")
 
         try:
             parsed = json.loads(result.stdout)
@@ -542,12 +575,49 @@ class ClaudeCodeService(BaseLLMService):
             self._sessions.pop(cid, None)
         self._save_sessions()
 
+    def context_size(self, conversation_id: str, profile=None) -> Optional[int]:
+        """Tokens of context the conversation's session held when its last run
+        ended. None = no session on file (the next message starts one);
+        0 = there is one, size not known yet."""
+        session = self._find_session(conversation_id, profile)
+        if not session:
+            return None
+        return admin_menu.session_context(session)
+
+    _QUICK_SYSTEM = ("You do the one task you are given and answer with the result only: "
+                     "no preface, no comments.")
+
     def quick_call(self, prompt: str, max_tokens: int,
                    model: Optional[str] = None) -> Optional[str]:
-        # ClaudeCodeService runs the Claude Code CLI as a subprocess, and Claude
-        # Code keeps (and compacts) its own session, so the compactor never
-        # touches a Claude Code chat and never calls this (see
-        # modules/context_compactor.py).
-        raise NotImplementedError(
-            "ClaudeCodeService cannot quick_call — subprocess startup makes one-shot use infeasible."
-        )
+        """One answer from a one-shot `claude` run: no session (none is resumed,
+        none is saved), no tools, no MCP server, no settings and no CLAUDE.md,
+        on the machine's own Claude Code login. The prompt goes in on stdin.
+
+        `max_tokens` cannot be passed to the CLI: the prompt has to state the
+        length it wants. Returns None on any failure (logged), never raises."""
+        cmd = ["claude", "--output-format", "json", "--tools", "", "--strict-mcp-config",
+               "--setting-sources", "project", "--safe-mode", "--no-session-persistence",
+               "--system-prompt", self._QUICK_SYSTEM]
+        if model:
+            cmd += ["--model", model]
+        cmd += ["-p"]
+        try:
+            result = subprocess.run(
+                cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                cwd=Config.DATA_DIR,
+                timeout=getattr(Config, 'CLAUDE_CODE_FENCED_TIMEOUT', 180) or 180)
+            parsed = json.loads(result.stdout)
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as e:
+            logging.warning(f"ClaudeCodeService.quick_call: {type(e).__name__}: {e}")
+            return None
+        admin_menu.note_cost(parsed.get("total_cost_usd"))
+        if result.returncode != 0 or parsed.get("is_error"):
+            logging.warning(
+                f"ClaudeCodeService.quick_call: claude exited {result.returncode}: "
+                f"{parsed.get('api_error_status')} {str(parsed.get('result'))[:300]}")
+            return None
+        logging.info(
+            f"ClaudeCodeService.quick_call: model={model or 'default'} "
+            f"prompt_chars={len(prompt)} cost_usd={parsed.get('total_cost_usd')} "
+            f"duration_ms={parsed.get('duration_ms')}")
+        return parsed.get("result") or None

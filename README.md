@@ -54,19 +54,29 @@ API providers get a system prompt. The default is a short built-in text (`module
 
 With `claude-code`, gpette runs the `claude` CLI in a working folder (`[claude_code] workdir`). The `CLAUDE.md` in that folder is the bot's personality and rules. `allowed_tools` decides what it may do there (default: read only).
 
-Each conversation gets its own Claude Code session. gpette saves the session id and passes `--resume` on the next message, so the bot remembers the chat. When a new session starts, the last few messages are added as context.
+Each conversation gets its own Claude Code session. gpette saves the session id and passes `--resume` on the next message, so the bot remembers the chat. A new session starts with the summary of the earlier conversation, if there is one, and the latest 10 messages.
+
+A session grows with every message, and a big session makes every turn slower and dearer. So gpette cuts it (`[compaction.claude_code]`): after each run it reads how many tokens the session holds. From 300,000 on, one short call checks each new message, and a new subject cuts. From 400,000 on, the next message cuts. A cut folds gpette's own log of the chat into the running summary (up to 1,000 words) and drops the session. Both calls are one-shot `claude` runs on Sonnet with no session and no tools, on the same login as the bot. If the summary call fails nothing is cut, and the next message tries again. `/compact` cuts at any size and answers with what it did. Timer fires follow the same rules.
 
 `[sessions] routing = "shared"` makes every DM resume one single session instead. A profile can choose this too.
 
 `routing = "per_account"` keeps one session per person instead of per chat: the same person writing from two inboxes (or two chats) continues one conversation. Who a person is comes from `[sessions] owner_resolver`, a module with `owner_for(inbox_id) -> str | None` (for example the account an inbox belongs to). Without one, each inbox is its own person. Groups always keep one session per group.
 
-A user can start over by sending `/reset`, `reset conversation`, `fresh start` or `new session`.
+A user can start over by sending `/reset`, `reset conversation`, `fresh start` or `new session`: the session and the summary are dropped, and nothing earlier is carried over.
 
 ## Profiles
 
 A profile gives some people or groups their own environment: provider, model, folder, tools, prompt, session routing and gate. Declare it as `[profiles.<name>]` with a `members` list of inbox ids and group conversation ids.
 
 A message is matched by its group id first, then by the sender's inbox id. Anything unmatched uses the top-level settings. Every key is optional. See the end of `gpette.example.toml` for the full list.
+
+## The menu and errors
+
+A profile with `admin = true` gets `/menu`: a message of buttons (Status, Model, Session, Timers, Errors, Help). Apps that know the `coinbase.com/actions` content type show buttons; any other app shows a numbered list, and typing the number works the same. It runs before the model, so it answers while the model is over its limit. Session has "Compact now" and "New session", the same as typing `/compact` and `/reset`. Shortcuts: `/status`, `/model <name>` (`/model default` goes back to the config), `/compact`, `/reset`. A model picked here, and paused timers, are kept in `<data_dir>/menu_state.json` and survive a restart. On other profiles `/menu` is ordinary text. If the menu itself fails, that press is dropped and you get a message with the error; the conversation keeps working.
+
+When a Claude Code run fails, the reason is sorted (limit, overloaded, auth, timeout, session, other) and answered per profile with `on_error`: `describe` sends the reason and the model (the default for admin profiles), `generic` sends `error_reply` ("I'm not available right now…" unless you set your own; `[claude_code] error_reply` sets it for every profile). A timer fire reports a failure once, stays quiet while it repeats, and says "back" when a run works again. Only a missing session is dropped and retried fresh; a limit or a login error keeps the session.
+
+A message gpette crashes on is dropped, not retried: the webhook answers the daemon `422` and logs the traceback (`handler failed, DROPPED`), so one bad message never holds the ones behind it.
 
 ## Group chats
 
@@ -103,7 +113,19 @@ Its main use: **one inbox, two machines.** XMTP lets one inbox run several insta
 
 The model can set reminders that fire later. When a timer fires, the model gets a message that starts with `Timer fired:` plus the instructions it wrote. If it answers exactly `[NO_REPLY]`, nothing is sent. This lets a timer do quiet work.
 
-Timers are Python tools (`setTimer`, `listTimers`, `editTimer`, `cancelTimer`), so API providers can set them. Claude Code cannot call Python tools.
+Timers are Python tools (`setTimer`, `listTimers`, `editTimer`, `cancelTimer`), so API providers can set them. Claude Code cannot call Python tools; a Claude Code profile that may run Bash uses the command line instead:
+
+```
+python scripts/timer.py set "Morning check" "Read the notes and tell me what is due today" --time "8 AM" --type recurring
+python scripts/timer.py list
+python scripts/timer.py cancel <id>
+```
+
+gpette sets `GPETTE_CONVERSATION_ID` for every Claude Code run, so inside a bot's run the timer lands in the chat being answered; from your own terminal pass `--conv` (`timer.py conversations` lists the ids). `--skip-session` fires in a fresh session, without the chat's history. The store is read every minute, so no restart is needed.
+
+**A fire runs in the profile of the person the conversation belongs to**: the profile last used there, or after a restart the profile of the last person who wrote in that chat (a group: by its id). Its reply goes to that conversation. A chat nobody has written in falls to the default settings. `tests/test_timers.py` checks this without a model.
+
+A bot that can run `timer.py` can set a timer in any conversation of this gpette, so give Bash only to profiles you trust with that.
 
 ## Tools
 
@@ -120,7 +142,7 @@ A profile's `tools` list limits which tools it may call.
 `[server] data_dir` (default `./data`) holds everything gpette writes:
 
 - `gpette.db`: conversations, messages, timers, who is in, and the server log (SQLite)
-- `logs/app.log`
+- `logs/app.log`: a message is logged by its shape (conversation, sender, type, size) when it arrives; its text is logged only after the filter and the gate let it through
 - `uploads/`: attachments
 - `claude_sessions.json`: Claude Code session ids
 - `config_overrides.json`: changes made from the web UI
@@ -154,7 +176,7 @@ It prints one row per step: pass or fail, the reply, and the turns, cost and den
 
 - The HTTP API and the web UI have no login. gpette listens on 127.0.0.1 by default. Keep it that way.
 - The daemon must run on the same machine: the incoming routes only accept local callers.
-- Claude Code profiles cannot use the Python tools, timers included.
+- Claude Code profiles cannot use the Python tools. For timers they run `scripts/timer.py` (needs Bash).
 - One process, one SQLite file. Other storage needs a plug-in.
 - XMTP network changes are the daemon's concern. Read its README.
 

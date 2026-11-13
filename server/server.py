@@ -7,6 +7,7 @@ from modules.gates import get_gate, invalidate_conversation as invalidate_gate_c
 from modules.profiles import resolve_profile
 from modules import filter as message_filter
 from modules import routes as route_log
+from modules import admin_menu
 from modules.proactive_system import ProactiveSystem
 from .routes.routes import bp as xmtp_routes
 from .routes.admin import bp as admin_routes
@@ -19,7 +20,7 @@ import json
 
 from config import Config, validate_compaction_config
 
-from utils.message_logger import log_message_flow, truncate_message
+from utils.message_logger import log_message_flow
 import threading
 import logging
 import time
@@ -180,6 +181,36 @@ def create_server(config_class):
             return
 
         # auth_result['action'] == 'allow' - continue with normal flow
+
+        # /menu and its buttons (admin profiles only), answered before the model
+        # so they work while it is over its limit. A button press (intent) on a
+        # profile without the menu is dropped: it is not text for the model.
+        # A menu that raises (here or while its answer is sent) must not take
+        # the conversation down with it: the press is dropped, the user is told,
+        # and ordinary chat goes on to the model.
+        try:
+            menu_msgs, consumed, replacement = admin_menu.handle(
+                standardized_message, profile, conversation_db)
+            for m in menu_msgs:
+                sendMessage(m)
+        except Exception as e:
+            logging.exception("admin_menu failed, press dropped")
+            notice = admin_menu.failure_notice(standardized_message, profile, e)
+            consumed, replacement = notice is not None, None
+            if notice:
+                try:
+                    sendMessage(notice)
+                except Exception:
+                    logging.exception("admin_menu: failure notice not sent")
+        if consumed and replacement is None:
+            return
+        if consumed:
+            standardized_message['contentType'] = 'text'
+            standardized_message['content'] = {'type': 'text', 'value': replacement}
+        elif standardized_message.get('contentType') == 'intent':
+            logging.info("Intent on a profile without the menu, ignored")
+            return
+
         logging.info(f"Incoming message from: {standardized_message.get('senderInboxId')} in conversation: {standardized_message.get('conversationId')}")
         content_type = standardized_message.get('contentType', 'text')
         logging.info(f"Incoming message: content type: {content_type}")
@@ -316,8 +347,9 @@ def standardize_message(data):
             logging.error("Failed to parse JSON string")
             return None
 
-    # For debugging, log the entire data structure
-    logging.info(f"Standardize message input: {data}")
+    # The log gets the shape of a message, never its text: this runs before the
+    # filter and the gate, so the text may be from anyone.
+    logging.info(f"Standardize message input: {message_shape(data)}")
 
     # Extract conversation identifiers
     conversation_id = data.get('conversationId')
@@ -346,6 +378,10 @@ def standardize_message(data):
         'members': data.get('members'),
     }
     
+    # A button press on a menu (xmtp_daemon `intent`): {id, actionId, metadata?}
+    if data.get('intent'):
+        standardized_message['intent'] = data['intent']
+
     # Extract metadata for attachments
     if data.get('contentType') and 'attachment' in data.get('contentType'):
         standardized_message['filename'] = data.get('filename', 'file')
@@ -357,22 +393,17 @@ def standardize_message(data):
 
     # Process content - THIS IS THE IMPORTANT PART
     if 'content' in data:
-        logging.info(f"Processing content: {type(data['content'])}, value: {data['content']}")
-        
         if isinstance(data['content'], dict):
             standardized_message['content'] = data['content']
-            logging.info(f"Content is dict: {data['content']}")
         elif data.get('contentType') and 'attachment' in data.get('contentType'):
             # This is a binary attachment, preserve as is
             standardized_message['content'] = data['content']
-            logging.info("Content is attachment")
         else:
             # Plain text or string content
             standardized_message['content'] = {
                 'type': 'text',
                 'value': data['content']
             }
-            logging.info(f"Content formatted as text: {standardized_message['content']}")
     else:
         logging.warning("No content field in message data")
     
@@ -392,13 +423,22 @@ def standardize_message(data):
             'value': 'Empty message'
         }
 
-    # Log the final standardized message
-    logging.info(f"Final standardized message: {standardized_message}")
     sender_id = standardized_message.get('senderInboxId', 'unknown')
-    content_preview = truncate_message(standardized_message.get('content'))
-    log_message_flow("Server", "CLIENT", "standardized_message", sender_id, content_preview)
-    
+    log_message_flow("Server", "CLIENT", "standardized_message", sender_id,
+                     standardized_message.get('contentType') or 'text')
+
     return standardized_message
+
+
+def message_shape(data):
+    """One log line about a message that holds none of what its sender wrote:
+    who, where, what kind, how long. Used before the filter and the gate."""
+    content = data.get('content')
+    if isinstance(content, dict):
+        content = content.get('value')
+    size = len(content) if isinstance(content, (str, bytes, list)) else 0
+    return (f"conversation={data.get('conversationId')} sender={data.get('senderInboxId')} "
+            f"kind={data.get('kind')} type={data.get('contentType') or 'text'} size={size}")
 
 def _emit_outgoing(message: dict):
     """Hand one outgoing message to xmtp_daemon, and show it to any web UI
@@ -422,6 +462,15 @@ def sendMessage(data: dict):
             "conversationId": conversation_id,
             "contentType": "readReceipt",
             "content": ""
+        })
+        return
+
+    # A menu of buttons (modules/admin_menu.py), passed through as is.
+    if data.get("contentType") == "actions":
+        _emit_outgoing({
+            "conversationId": conversation_id,
+            "contentType": "actions",
+            "actions": data.get("actions"),
         })
         return
 
