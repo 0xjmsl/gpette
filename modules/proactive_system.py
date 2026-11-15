@@ -114,7 +114,9 @@ class ProactiveSystem:
                         "description": timer.get('description', ''),
                         "instructions": timer.get('instructions', ''),
                         "timer_type": timer_type,
-                        "skip_session": timer.get('skip_session', False)
+                        "skip_session": timer.get('skip_session', False),
+                        "profile": timer.get('profile'),
+                        "owner_inbox": timer.get('owner_inbox')
                     }
                 }
             }

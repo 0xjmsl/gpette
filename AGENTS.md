@@ -34,6 +34,7 @@ Notes for AI agents that set up, run or extend gpette. Read README.md first for 
 | A profile is not used | Its `members` must hold the exact inbox id or group conversation id (case and `0x` do not matter). Group id wins over sender. |
 | A group gets no tools | Expected: groups outside a profile run tool-less. Add the group id to a profile. |
 | A timer fired but nothing was sent | The model answered `[NO_REPLY]`. That is by design. |
+| A timer never fires, the log says `timer_refused` | The timer has no profile, its profile left the config, or its inbox is no longer a member of it. `python scripts/timer.py list --all` shows it; `timer.py bind` repairs it. |
 | Where did a message go? | `http://127.0.0.1:<port>/admin` (this machine only): each conversation's filter rule, profile, gate decision and session; the "who would handle this?" box predicts it without sending. Raw: `<data_dir>/routes.jsonl`. |
 | A message is ignored with no gate line in the log | Look for `Filter: ignored … (<rule>)`: a `[filter]` rule (or `default = "ignore"`) dropped it before the gate. Expected when another installation of the same inbox serves that person. |
 | Two machines on one inbox both answer, or neither | Their `[filter]` rules overlap or leave a gap. Each person must hit `answer` on exactly one side; groups are matched by group id only. SETUPS.md § 2. |
@@ -66,5 +67,5 @@ Your module must be importable: install it, or run gpette with it on `PYTHONPATH
 - One session per conversation by default. `sessions.routing = "shared"` puts every DM into one session.
 - Claude Code runs with `--permission-mode dontAsk` and only the tools in `allowed_tools`.
 - Claude Code lets Read, Glob and Grep see the whole working folder without a rule. So when one of them is allowed only with a scope, like `Read(./images/**)`, gpette also denies it on every other top-level entry of the folder. Images a user sends are saved to `<workdir>/images`.
-- Python tools work with API providers only, not with Claude Code. Timers for a Claude Code bot: `python scripts/timer.py` (set, list, edit, cancel, conversations), with Bash allowed on that profile. Put the commands in the profile's `CLAUDE.md` so the bot knows them.
+- Python tools work with API providers only, not with Claude Code. Timers for a Claude Code bot: `python scripts/timer.py` (set, list, edit, cancel, bind, conversations; a timer keeps the profile and inbox of the turn that set it), with Bash allowed on that profile. Put the commands in the profile's `CLAUDE.md` so the bot knows them.
 - Images up to about 1 MB are passed to the model. Larger ones are compressed or replaced by a note.

@@ -146,6 +146,7 @@ def export(path):
             'timer_type': t.get('timer_type') or 'one_shot', 'interval_seconds': t.get('interval_seconds'),
             'fire_at': t['fire_at'], 'created_at': t['created_at'], 'last_fired_at': t.get('last_fired_at'),
             'status': t.get('status') or 'active', 'skip_session': bool(t.get('skip_session')),
+            'profile': t.get('profile'), 'owner_inbox': t.get('owner_inbox'),
         })
 
     with open(path, 'w', encoding='utf-8', newline='\n') as f:
@@ -280,7 +281,8 @@ def do_import(path, dry_run=False):
         db.restore_timer(rec['timer_id'], rec['conversation_id'], rec['description'], rec['instructions'],
                          rec['fire_at'], rec['created_at'], timer_type=rec.get('timer_type') or 'one_shot',
                          interval_seconds=rec.get('interval_seconds'), last_fired_at=rec.get('last_fired_at'),
-                         status=rec.get('status') or 'active', skip_session=bool(rec.get('skip_session')))
+                         status=rec.get('status') or 'active', skip_session=bool(rec.get('skip_session')),
+                         profile=rec.get('profile'), owner_inbox=rec.get('owner_inbox'))
         stats['timer']['updated' if had else 'inserted'] += 1
 
     print(f"imported {path}")

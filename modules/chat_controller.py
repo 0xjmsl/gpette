@@ -13,7 +13,7 @@ from config import Config
 from models.conversation_db import ConversationDB
 from modules import sender_names
 from memory.manager import MemoryManager
-from modules.profiles import resolve_profile, profile_for_conversation
+from modules.profiles import resolve_profile, profile_for_conversation, profile_for_timer
 
 # A timer fire that answers exactly this sends nothing back (see _handle_proactive_message).
 NO_REPLY_TOKEN = "[NO_REPLY]"
@@ -299,10 +299,22 @@ class ChatController:
                 log_message_flow("ChatController", "SYSTEM", "warning", conversation_id, "Proactive message without timer data, ignoring")
                 return None
 
+            # A fire runs as what the timer says: its profile, its inbox, its
+            # conversation. Timer fires have no envelope, so kind comes from the DB
+            # (the conversation row was committed by an earlier real message).
+            # A timer whose profile is missing, gone from the config, or no longer
+            # the profile of that chat does not run. There is no fallback.
+            is_group = self._conversation_db.is_group_conversation(conversation_id)
+            profile, refused = profile_for_timer({**timer_data, "conversation_id": conversation_id}, is_group)
+            if profile is None:
+                log_message_flow("ChatController", "SYSTEM", "timer_refused", conversation_id,
+                                 f"timer={timer_data.get('timer_id')} did not fire: {refused}")
+                return None
+
             skip_session = bool(timer_data.get('skip_session', False))
             tool_name = "timer_fired"
             log_message_flow("ProactiveSystem", "ChatController", "timer_trigger", conversation_id,
-                             f"timer={timer_data.get('timer_id')} skip_session={skip_session}")
+                             f"timer={timer_data.get('timer_id')} profile={profile.name} skip_session={skip_session}")
 
             context_text = self._format_timer_context(timer_data)
 
@@ -334,11 +346,6 @@ class ChatController:
             self._conversation_db.store_message(fake_assistant)
             self._conversation_db.store_message(tool_return)
 
-            # Timer fires have no envelope, so kind comes from the DB here — the
-            # conversation row is guaranteed committed by an earlier real message.
-            is_group = self._conversation_db.is_group_conversation(conversation_id)
-            profile = profile_for_conversation(
-                conversation_id, "group" if is_group else "dm", self._conversation_db)
             service = self._service_for(profile)
 
             # Build system prompt

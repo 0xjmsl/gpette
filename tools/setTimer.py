@@ -98,6 +98,13 @@ def setTimer(description, instructions, time="", timer_type="one_shot", _convers
     else:
         interval_seconds = None
 
+    # The timer runs as the profile and inbox of the turn that set it.
+    from modules.profiles import timer_binding
+    binding = timer_binding(_conversation_id)
+    if not binding:
+        return "Error: Could not determine which profile this timer belongs to."
+    profile_name, owner_inbox = binding
+
     db = ConversationDB()
     timer_id = db.create_timer(
         conversation_id=_conversation_id,
@@ -105,7 +112,9 @@ def setTimer(description, instructions, time="", timer_type="one_shot", _convers
         instructions=instructions,
         fire_at=fire_at,
         timer_type=timer_type,
-        interval_seconds=interval_seconds
+        interval_seconds=interval_seconds,
+        profile=profile_name,
+        owner_inbox=owner_inbox
     )
 
     type_note = " (recurring)" if timer_type == "recurring" else ""

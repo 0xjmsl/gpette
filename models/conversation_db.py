@@ -102,7 +102,9 @@ _SCHEMA = [
         created_at INTEGER NOT NULL,
         last_fired_at INTEGER NULL,
         status TEXT DEFAULT 'active',
-        skip_session INTEGER DEFAULT 0
+        skip_session INTEGER DEFAULT 0,
+        profile TEXT NULL,
+        owner_inbox TEXT NULL
     )
     """,
     # One running summary per history (modules/context_compactor.py): the summary text and
@@ -123,6 +125,10 @@ _MIGRATIONS = [
     ('messages_v2', 'tool_call_id', 'TEXT NULL'),
     ('conversations', 'reset_at', 'INTEGER NULL'),
     ('timers', 'skip_session', 'INTEGER DEFAULT 0'),
+    # What a fire runs as: the profile the timer was set in and the inbox that set it.
+    # A timer without a profile does not fire (scripts/timer.py bind).
+    ('timers', 'profile', 'TEXT NULL'),
+    ('timers', 'owner_inbox', 'TEXT NULL'),
 ]
 
 
@@ -673,45 +679,64 @@ class SQLiteConversationDB:
 
     def restore_timer(self, timer_id, conversation_id, description, instructions, fire_at, created_at,
                       timer_type='one_shot', interval_seconds=None, last_fired_at=None,
-                      status='active', skip_session=False):
+                      status='active', skip_session=False, profile=None, owner_inbox=None):
         """Create or overwrite a timer with the given id and status."""
         self._execute("""
         INSERT INTO timers (timer_id, conversation_id, description, instructions, timer_type,
-                            interval_seconds, fire_at, created_at, last_fired_at, status, skip_session)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            interval_seconds, fire_at, created_at, last_fired_at, status, skip_session,
+                            profile, owner_inbox)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(timer_id) DO UPDATE SET
             conversation_id = excluded.conversation_id, description = excluded.description,
             instructions = excluded.instructions, timer_type = excluded.timer_type,
             interval_seconds = excluded.interval_seconds, fire_at = excluded.fire_at,
             created_at = excluded.created_at, last_fired_at = excluded.last_fired_at,
-            status = excluded.status, skip_session = excluded.skip_session
+            status = excluded.status, skip_session = excluded.skip_session,
+            profile = excluded.profile, owner_inbox = excluded.owner_inbox
         """, (timer_id, conversation_id, description, instructions, timer_type, interval_seconds,
-              fire_at, created_at, last_fired_at, status, 1 if skip_session else 0))
+              fire_at, created_at, last_fired_at, status, 1 if skip_session else 0,
+              profile or None, owner_inbox or None))
         return True
 
     # ==================== TIMER METHODS ====================
 
-    _TIMER_COLS = "timer_id, conversation_id, description, instructions, timer_type, interval_seconds, fire_at, created_at, last_fired_at, status"
+    _TIMER_COLS = "timer_id, conversation_id, description, instructions, timer_type, interval_seconds, fire_at, created_at, last_fired_at, status, profile, owner_inbox"
 
     def create_timer(self, conversation_id, description, instructions, fire_at, timer_type='one_shot',
-                     interval_seconds=None, skip_session=False):
+                     interval_seconds=None, skip_session=False, profile=None, owner_inbox=None):
         """Create a new timer and return its timer_id. skip_session: the fire
-        runs in a fresh session, without the chat's history."""
+        runs in a fresh session, without the chat's history.
+
+        profile and owner_inbox are what every fire runs as: the profile the
+        timer was set in and the inbox that set it (modules.profiles.timer_binding).
+        They are written once, here; update_timer cannot change them. The reply
+        of a fire goes to conversation_id. profile is required."""
+        if not profile:
+            raise ValueError("a timer needs the profile it runs in")
         timer_id = uuid.uuid4().hex[:8]
         created_at = int(time.time())
         self._execute("""
-        INSERT INTO timers (timer_id, conversation_id, description, instructions, timer_type, interval_seconds, fire_at, created_at, status, skip_session)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+        INSERT INTO timers (timer_id, conversation_id, description, instructions, timer_type, interval_seconds, fire_at, created_at, status, skip_session, profile, owner_inbox)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
         """, (timer_id, conversation_id, description, instructions, timer_type, interval_seconds, fire_at,
-              created_at, 1 if skip_session else 0))
+              created_at, 1 if skip_session else 0, profile, owner_inbox or None))
         return timer_id
+
+    def bind_timer(self, timer_id, profile, owner_inbox=None):
+        """Write what a timer runs as. For timers made before the binding existed,
+        and for an operator's repair (scripts/timer.py bind); not for edits."""
+        if not profile:
+            raise ValueError("a timer needs the profile it runs in")
+        self._execute("UPDATE timers SET profile = ?, owner_inbox = ? WHERE timer_id = ?",
+                      (profile, owner_inbox or None, timer_id))
+        return True
 
     def last_human_sender(self, conversation_id):
         """The inbox of the newest message a person sent in this conversation, or
-        None. A timer fire carries no sender; this is how it finds whose profile
-        to run in after a restart. It reads the whole conversation on purpose
-        (not the recent window, and not only what follows a reset): a chat that
-        is mostly timer fires can go hundreds of rows without a human message."""
+        None. A tool result carries no sender; this is how it finds whose profile
+        applies after a restart. It reads the whole conversation on purpose (not
+        the recent window, and not only what follows a reset). Timer fires do
+        not use it: a timer carries its own profile and inbox."""
         try:
             rows = self._query("""
             SELECT sender_inbox_id FROM messages_v2

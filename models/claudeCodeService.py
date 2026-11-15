@@ -12,7 +12,7 @@ from models.base_llm_service import BaseLLMService
 from config import Config
 from utils.message_logger import log_message_flow
 from modules.thread_joins import get_group
-from modules.profiles import base_profile, workdir_for
+from modules.profiles import base_profile, workdir_for, timer_binding
 from modules import transcripts
 from modules import admin_menu
 from modules import context_compactor
@@ -493,9 +493,12 @@ class ClaudeCodeService(BaseLLMService):
             text=True,
             encoding="utf-8",
             cwd=cwd,
-            # scripts/timer.py reads this, so a bot that may run it sets timers
-            # in the chat it is answering without knowing the id.
-            env={**os.environ, "GPETTE_CONVERSATION_ID": str(conversation_id or "")},
+            # scripts/timer.py reads these, so a bot that may run it sets a timer
+            # in the chat it is answering, bound to the profile and inbox of this
+            # turn, without knowing any of the three.
+            env={**os.environ, "GPETTE_CONVERSATION_ID": str(conversation_id or ""),
+                 "GPETTE_PROFILE": profile.name,
+                 "GPETTE_TIMER_OWNER": (timer_binding(conversation_id) or ("", ""))[1]},
             timeout=self._timeout_for(profile)
         )
 

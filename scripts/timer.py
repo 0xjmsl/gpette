@@ -1,7 +1,8 @@
 """Timers from the command line: set, list, edit, cancel.
 
     python scripts/timer.py list [--all] [--conv ID]
-    python scripts/timer.py set "description" "instructions" --time TIME [--type recurring] [--skip-session] [--conv ID]
+    python scripts/timer.py set "description" "instructions" --time TIME [--type recurring] [--skip-session] [--conv ID] [--profile NAME] [--owner INBOX]
+    python scripts/timer.py bind TIMER_ID --profile NAME [--owner INBOX]
     python scripts/timer.py edit TIMER_ID [--desc ..] [--instructions ..] [--time TIME] [--type ..] [--skip-session | --no-skip-session]
     python scripts/timer.py cancel TIMER_ID
     python scripts/timer.py conversations
@@ -14,10 +15,19 @@ bot cannot call those. A Claude Code profile that may run Bash calls this instea
 gpette reads due timers from the store every minute, so a row written here fires;
 no restart is needed.
 
-Which conversation: --conv, or GPETTE_CONVERSATION_ID, which gpette sets for every
-Claude Code run to the chat being answered. So inside a bot's run, "set" needs no id.
-A fire runs in the profile of the person the conversation belongs to, and its reply
-goes to that conversation.
+A timer holds three things, written when it is set and never guessed later:
+the conversation its reply goes to (--conv), the profile every fire runs in
+(--profile) and the inbox that set it (--owner). gpette sets GPETTE_CONVERSATION_ID,
+GPETTE_PROFILE and GPETTE_TIMER_OWNER for every Claude Code run, to the chat being
+answered, its profile and the person who wrote. So inside a bot's run "set" needs
+none of the three. From your own terminal pass them.
+
+The profile must be the one that chat resolves to: in a DM the profile the inbox
+is a member of, so a timer only ever messages an inbox linked to its profile; in a
+group the group's own profile, else the setter's. "set" refuses anything else, and
+a fire checks again: a timer that no longer passes does not fire (the server log
+says timer_refused and why). "edit" keeps the profile and the inbox. "bind" writes
+them on a timer made before they existed (list shows those as UNBOUND).
 
 The store is the one gpette.toml points at (GPETTE_CONFIG works as for the server).
 Only public ConversationDB methods are used, so any storage backend works.
@@ -86,7 +96,26 @@ def _line(t, now):
         every = int(t.get("interval_seconds") or 0)
         kind = " (daily)" if every == 86400 else f" (every {every // 60}min)"
     skip = " [skip-session]" if t.get("skip_session") else ""
-    return f"[{t['timer_id']}] {t['description']}: fires {when}{kind}{skip}  conv={str(t['conversation_id'])[:8]}\n         instructions: {t['instructions']}"
+    if t.get("profile"):
+        runs = f"profile={t['profile']} owner={(str(t.get('owner_inbox') or '-'))[:8]}"
+    else:
+        runs = "UNBOUND, will not fire (timer.py bind)"
+    return (f"[{t['timer_id']}] {t['description']}: fires {when}{kind}{skip}  conv={str(t['conversation_id'])[:8]}  {runs}\n"
+            f"         instructions: {t['instructions']}")
+
+
+def _binding(args, db, conv):
+    """-> (profile, owner inbox) for a timer in `conv`, checked; exits when it may not run."""
+    from modules import profiles
+    name = (getattr(args, "profile", None) or os.environ.get("GPETTE_PROFILE", "")).strip()
+    owner = (getattr(args, "owner", None) or os.environ.get("GPETTE_TIMER_OWNER", "")).strip().lower()
+    if not name:
+        sys.exit("No profile: pass --profile NAME (and --owner INBOX for a DM). "
+                 "Inside a bot's run GPETTE_PROFILE and GPETTE_TIMER_OWNER are set for you.")
+    reason = profiles.check_timer_binding(name, owner, conv, db.is_group_conversation(conv))
+    if reason:
+        sys.exit(f"Error: this timer would not fire: {reason}.")
+    return name, owner
 
 
 def cmd_list(args):
@@ -114,10 +143,23 @@ def cmd_set(args):
     if conv not in known:
         sys.exit(f"Error: no conversation '{conv}' in this store. A timer needs a chat that has "
                  "had at least one message (see `timer.py conversations`).")
+    name, owner = _binding(args, db, conv)
     timer_id = db.create_timer(conv, args.description, args.instructions, int(time.time()) + minutes * 60,
-                               timer_type=args.type, interval_seconds=every, skip_session=args.skip_session)
+                               timer_type=args.type, interval_seconds=every, skip_session=args.skip_session,
+                               profile=name, owner_inbox=owner)
     print(f"Timer '{args.description}' set ({info}{' (recurring)' if every else ''}"
-          f"{' [skip-session]' if args.skip_session else ''}). ID: {timer_id}")
+          f"{' [skip-session]' if args.skip_session else ''}, runs as profile '{name}'). ID: {timer_id}")
+
+
+def cmd_bind(args):
+    db = _db()
+    timer = db.get_timer_by_id(args.timer_id)
+    if not timer:
+        sys.exit(f"Error: timer '{args.timer_id}' not found.")
+    name, owner = _binding(args, db, timer["conversation_id"])
+    db.bind_timer(args.timer_id, name, owner)
+    print(f"Timer '{args.timer_id}' ({timer.get('description', '')}) runs as profile '{name}'"
+          f"{', inbox ' + owner[:8] if owner else ''}, reports to conversation {str(timer['conversation_id'])[:8]}.")
 
 
 def cmd_edit(args):
@@ -196,6 +238,13 @@ def main():
     p.add_argument("--type", choices=["one_shot", "recurring"], default="one_shot")
     p.add_argument("--skip-session", action="store_true", help="Fire in a fresh session, without the chat's history")
     p.add_argument("--conv", help="Conversation id (default: GPETTE_CONVERSATION_ID)")
+    p.add_argument("--profile", help="Profile every fire runs in (default: GPETTE_PROFILE)")
+    p.add_argument("--owner", help="Inbox that sets it; in a DM, the inbox it reports to (default: GPETTE_TIMER_OWNER)")
+
+    p = sub.add_parser("bind", help="Write the profile and inbox of a timer that has none")
+    p.add_argument("timer_id")
+    p.add_argument("--profile", required=True)
+    p.add_argument("--owner")
 
     p = sub.add_parser("edit", help="Change a timer")
     p.add_argument("timer_id")
@@ -212,7 +261,7 @@ def main():
     sub.add_parser("conversations", help="List the chats a timer can be set in")
 
     args = parser.parse_args()
-    {"list": cmd_list, "set": cmd_set, "edit": cmd_edit, "cancel": cmd_cancel,
+    {"list": cmd_list, "set": cmd_set, "bind": cmd_bind, "edit": cmd_edit, "cancel": cmd_cancel,
      "conversations": cmd_conversations}[args.command](args)
 
 

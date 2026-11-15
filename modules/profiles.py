@@ -273,23 +273,90 @@ def resolve_profile(conversation_id, sender_inbox_id, kind):
             profile.sessions = 'per_conversation'    # a group has many senders: keep one session per group
         else:
             profile.session_owner = owner_for(sender_inbox_id)
-    remember(conversation_id, profile.name, kind, profile.session_owner)
+    remember(conversation_id, profile.name, kind, profile.session_owner, sender_inbox_id)
     return profile
 
 
 # --- conversation -> profile, for messages that carry no sender ---------------------
-# Tool results and timer fires arrive with a conversation id only. The last
-# resolution for that conversation is remembered here; after a restart the DM's
-# last human sender is looked up in the stored history instead.
+# Tool results arrive with a conversation id only. The last resolution for that
+# conversation is remembered here; after a restart the DM's last human sender is
+# looked up in the stored history instead. Timer fires do NOT come through here:
+# a timer carries its own profile and inbox (profile_for_timer below).
 
 _last = {}
 _last_lock = threading.Lock()
 
 
-def remember(conversation_id, name, kind, owner=''):
+def remember(conversation_id, name, kind, owner='', sender=''):
     if conversation_id:
         with _last_lock:
             _last[conversation_id] = (name, kind, owner)
+            _last_sender[conversation_id] = _norm(sender)
+
+
+_last_sender = {}
+
+
+# --- timers: a fire runs as what the timer says ---------------------------------------
+# A timer row holds the conversation its reply goes to, the profile it was set in
+# and the inbox that set it. Nothing is looked up at fire time; the stored values
+# are only checked against the config, and a timer that fails the check does not fire.
+
+def timer_binding(conversation_id):
+    """(profile name, inbox) of the turn being answered in this conversation, for
+    a timer set during it. None when this process has answered nothing there."""
+    with _last_lock:
+        known = _last.get(conversation_id)
+        sender = _last_sender.get(conversation_id, '')
+    if not known:
+        return None
+    return known[0], sender
+
+
+def check_timer_binding(name, owner_inbox, conversation_id, is_group):
+    """None when a timer may run as profile `name` in this conversation, else the
+    reason it may not. The rule: `name` is the profile this chat resolves to today.
+    A DM: the profile its inbox is a member of (else `default`), so the inbox a
+    timer messages is always one linked to its profile. A group: the group's own
+    profile, else its setter's, else the `group` sandbox."""
+    name = (name or '').strip()
+    if not name:
+        return "it has no profile (bind it: scripts/timer.py bind)"
+    if name not in (Config.PROFILES or {}) and name not in (DEFAULT, GROUP):
+        return f"its profile '{name}' is not in the config"
+    if is_group:
+        expected = _match(conversation_id) or _match(owner_inbox) or GROUP
+    else:
+        if not _norm(owner_inbox):
+            return "it has no inbox (a timer in a DM reports to one inbox)"
+        expected = _match(owner_inbox) or DEFAULT
+    if expected != name:
+        who = 'this group' if is_group else f"inbox {_norm(owner_inbox)[:12]}..."
+        return f"{who} belongs to profile '{expected}', not '{name}'"
+    return None
+
+
+def profile_for_timer(timer, is_group):
+    """(profile, None) for a timer fire, or (None, reason) when it must not run."""
+    name = (timer.get('profile') or '').strip()
+    owner_inbox = timer.get('owner_inbox') or ''
+    conversation_id = timer.get('conversation_id')
+    reason = check_timer_binding(name, owner_inbox, conversation_id, is_group)
+    if reason:
+        return None, reason
+    if name in (Config.PROFILES or {}):
+        profile = _from_config(name, Config.PROFILES[name])
+    else:
+        profile = _base(name, is_group)
+    if profile.sessions == 'per_account':
+        if is_group:
+            profile.sessions = 'per_conversation'
+        else:
+            profile.session_owner = owner_for(owner_inbox)
+    # The fire's own tool results, and a timer set during the fire, see this.
+    remember(conversation_id, profile.name, 'group' if is_group else 'dm',
+             profile.session_owner, owner_inbox)
+    return profile, None
 
 
 def profile_for_conversation(conversation_id, kind=None, conversation_db=None):
