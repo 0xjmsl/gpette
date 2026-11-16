@@ -28,7 +28,7 @@ ollama = "qwen3"
 
 [claude_code]
 workdir = "./workdir"                # its CLAUDE.md is the bot's personality and rules
-allowed_tools = ["Read", "Glob", "Grep"]
+allowed_tools = ["Read(./**)", "Glob(./**)", "Grep(./**)"]   # scoped: a bare "Read" can read ANY file the user can
 max_turns = 50
 timeout_secs = 3600
 privacy = true                       # bots never reveal paths, user names, machine or config details (per profile too)

@@ -52,7 +52,7 @@ API providers get a system prompt. The default is a short built-in text (`module
 
 ## Claude Code and sessions
 
-With `claude-code`, gpette runs the `claude` CLI in a working folder (`[claude_code] workdir`). The `CLAUDE.md` in that folder is the bot's personality and rules. `allowed_tools` decides what it may do there (default: read only).
+With `claude-code`, gpette runs the `claude` CLI in a working folder (`[claude_code] workdir`). The `CLAUDE.md` in that folder is the bot's personality and rules. `allowed_tools` decides what it may do there (default: read only). ⚠ Scope every tool to the folder: `Read(./**)`, not `Read`. A bare `Read`, `Glob` or `Grep` is allowed on **any path** the user running gpette can read (checked with `--permission-mode dontAsk`, Claude Code 2.1, 2026-11-16), so a bot anyone can talk to could be asked to read files outside its folder.
 
 Each conversation gets its own Claude Code session. gpette saves the session id and passes `--resume` on the next message, so the bot remembers the chat. A new session starts with the summary of the earlier conversation, if there is one, and the latest 10 messages.
 
