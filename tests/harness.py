@@ -37,7 +37,8 @@ Checks (text checks are case-insensitive; a list for contains / not_contains mea
     log_not_contains = "KIWI"              what gpette logged during the step does not hold it
 
 Strings in checks may use {tmp} (the temp folder), {tmp_name} (its folder name),
-{user} (this machine's user name) and {home} (the user's home folder).
+{user} (this machine's user name), {home} (the user's home folder) and {host_md} (a few
+words from this machine's own ~/.claude/CLAUDE.md, to check a bot never saw that file).
 
 It starts a fake xmtp_daemon (records POST /send, answers /api/init and /health) and
 gpette (`python main.py` with GPETTE_CONFIG), both on free 127.0.0.1 ports, POSTs each
@@ -403,6 +404,22 @@ def short(text, n):
     return text if len(text) <= n else text[: n - 3] + "..."
 
 
+def host_md_phrase():
+    """A few words from this machine's own ~/.claude/CLAUDE.md (its first line with
+    text), so a scenario can check that a bot never saw it. A marker that can't
+    appear when there is no such file."""
+    path = os.path.join(os.path.expanduser("~"), ".claude", "CLAUDE.md")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                words = line.strip().lstrip("#*->\"' ").split()
+                if len(words) >= 3:
+                    return " ".join(words[:4]).strip("\"'*")
+    except OSError:
+        pass
+    return "\x00no host CLAUDE.md\x00"
+
+
 # --- main ------------------------------------------------------------------------------
 
 def run(scenario_path, keep=False, only=None):
@@ -415,7 +432,7 @@ def run(scenario_path, keep=False, only=None):
 
     tmp = tempfile.mkdtemp(prefix="gpette_")
     subs = {"tmp": tmp, "tmp_name": os.path.basename(tmp), "user": getpass.getuser(),
-            "home": os.path.expanduser("~")}
+            "home": os.path.expanduser("~"), "host_md": host_md_phrase()}
     daemon = FakeDaemon()
     gpette_port = free_port()
     proc = None
