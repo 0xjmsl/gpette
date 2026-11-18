@@ -9,7 +9,7 @@ XMTP network <-> xmtp_daemon --POST /api/xmtp/incoming--> gpette --> LLM
                              <--------POST /send---------
 ```
 
-One bot, an owner/public split of one identity, several bots on one machine, several inboxes behind one gpette, mixed models: see [SETUPS.md](SETUPS.md).
+One bot, an owner/public split of one identity, several bots on one machine, several inboxes behind one gpette, mixed models, a team of bots that takes turns: see [SETUPS.md](SETUPS.md).
 
 > **What this is.** This is the small server we run our own XMTP bots on, shared as it is. It does what we need and stays simple: one process, SQLite, a config file. There are far more capable agent frameworks and bot tools out there; if you need scale, orchestration or a polished product, start with those. If you want something you can read in an afternoon and bend to your own setup, this may fit.
 
@@ -19,7 +19,7 @@ You need Python 3.11 or newer and a running xmtp_daemon.
 
 ```
 pip install -r requirements.txt
-cp gpette.example.toml gpette.toml      # then edit it
+cp gpette.example.toml gpette.toml      # then edit it (Windows: copy gpette.example.toml gpette.toml)
 python main.py
 ```
 
@@ -52,7 +52,7 @@ API providers get a system prompt. The default is a short built-in text (`module
 
 ## Claude Code and sessions
 
-With `claude-code`, gpette runs the `claude` CLI in a working folder (`[claude_code] workdir`). The `CLAUDE.md` in that folder is the bot's personality and rules. `allowed_tools` decides what it may do there (default: read only). ⚠ Scope every tool to the folder: `Read(./**)`, not `Read`. A bare `Read`, `Glob` or `Grep` is allowed on **any path** the user running gpette can read (checked with `--permission-mode dontAsk`, Claude Code 2.1, 2026-11-16), so a bot anyone can talk to could be asked to read files outside its folder.
+With `claude-code`, gpette runs the `claude` CLI in a working folder (`[claude_code] workdir`; on Windows write paths in `gpette.toml` with forward slashes, `C:/Users/me/bot`: a backslash is a TOML escape and stops gpette at start). The `CLAUDE.md` in that folder is the bot's personality and rules. `allowed_tools` decides what it may do there (default: read only). ⚠ Scope every tool to the folder: `Read(./**)`, not `Read`. A bare `Read`, `Glob` or `Grep` is allowed on **any path** the user running gpette can read (checked with `--permission-mode dontAsk`, Claude Code 2.1, 2026-11-16), so a bot anyone can talk to could be asked to read files outside its folder.
 
 Each conversation gets its own Claude Code session. gpette saves the session id and passes `--resume` on the next message, so the bot remembers the chat. A new session starts with the summary of the earlier conversation, if there is one, and the latest 10 messages.
 
@@ -102,7 +102,7 @@ How a message finds its way:
 - **It arrives.** The daemon says which inbox received it. Only the profiles bound to that inbox are tried, by group id and then by sender; a bound profile with no `members` answers everyone who writes to that inbox. Profiles with no `inbox` are tried after them, then the default. So you can write to alice and to bob from the same account and get two different bots, in two different chats.
 - **It leaves.** A reply goes out through the inbox its chat belongs to. gpette learns that from the first message it gets in the chat, or from the timer that fires there, and keeps it in `<data_dir>/conversation_inboxes.json`. A chat it knows nothing about goes out through `[daemon] url`.
 - **Several of your inboxes in one group** is fine: inside gpette each inbox has its own copy of the group, with the id `<group id>@<inbox name>` (its own history, session, profile and timers; list the plain group id in `members`), and each answer leaves through its own inbox. Pace them with `group_reply_secs` ([Group chats](#group-chats)).
-- **A bot that writes first** (a timer that reports to you, a hello): open the chat from its inbox with the daemon's `POST /dm` (`{"inboxId": "<yours>"}` returns the `conversationId`), then set the timer in that conversation with the bound profile (`timer.py set … --conv <id> --profile alice --owner <your inbox id>`). The first fire goes out as alice.
+- **A bot that reports to you on a timer:** a timer can only be set in a chat gpette has received a message in. Write one word to the bot first, find the chat with `timer.py conversations`, then set the timer there with the bound profile (`timer.py set … --conv <id> --profile alice --owner <your inbox id>`). Each fire goes out as alice. (The daemon's `POST /dm` opens a chat from the bot's side, but gpette does not know that chat until a message arrives in it.)
 
 gpette refuses to start if a profile names an inbox that is not under `[inboxes]`, or an inbox has no `url`. A config with no `[inboxes]` works exactly as before. The admin panel lists each inbox and its id. `tests/test_inboxes.py` checks all of the above with fake daemons, no model and no XMTP.
 
@@ -155,7 +155,7 @@ Its main use: **one inbox, two machines.** XMTP lets one inbox run several insta
 
 The model can set reminders that fire later. When a timer fires, the model gets a message that starts with `Timer fired:` plus the instructions it wrote. If it answers exactly `[NO_REPLY]`, nothing is sent. This lets a timer do quiet work. (A group turn may answer `[NO_REPLY]` too; a DM never: a person who writes gets an answer.)
 
-Timers are Python tools (`setTimer`, `listTimers`, `editTimer`, `cancelTimer`), so API providers can set them. Claude Code cannot call Python tools; a Claude Code profile that may run Bash uses the command line instead:
+Timers are Python tools (`setTimer`, `listTimers`, `editTimer`, `cancelTimer`), so API providers can set them. (`scripts/timer.py` below needs gpette's packages: run it with the same Python, or virtual environment, that runs `main.py`.) Claude Code cannot call Python tools; a Claude Code profile that may run Bash uses the command line instead:
 
 ```
 python scripts/timer.py set "Morning check" "Read the notes and tell me what is due today" --time "8 AM" --type recurring
@@ -163,9 +163,9 @@ python scripts/timer.py list
 python scripts/timer.py cancel <id>
 ```
 
-gpette sets `GPETTE_CONVERSATION_ID`, `GPETTE_PROFILE` and `GPETTE_TIMER_OWNER` for every Claude Code run, so inside a bot's run the timer lands in the chat being answered, bound to that turn's profile and to the person who wrote; from your own terminal pass `--conv`, `--profile` and, for a DM, `--owner` (`timer.py conversations` lists the ids). `--skip-session` fires in a fresh session, without the chat's history. The store is read every minute, so no restart is needed.
+gpette sets `GPETTE_CONVERSATION_ID`, `GPETTE_PROFILE` and `GPETTE_TIMER_OWNER` for every Claude Code run, so inside a bot's run the timer lands in the chat being answered, bound to that turn's profile and to the person who wrote; from your own terminal pass `--conv`, `--profile` and, for a DM, `--owner` (`timer.py conversations` lists the ids; `timer.py list` needs `--all` or `--conv` there). `--skip-session` fires in a fresh session, without the chat's history. The store is read every minute, so no restart is needed.
 
-**A timer holds what it runs as.** Three things are written when it is set and never worked out later: the conversation its reply goes to, the profile every fire runs in, and the inbox that set it. Editing a timer keeps all three. The profile has to be the one that chat resolves to. In a DM that is the profile the inbox is a member of, so a timer only ever messages an inbox linked to its profile, and a person with two inboxes has one timer per chat, each reporting to its own. In a group it is the group's own profile if the group is listed, else the setter's; the reply goes to the group only. `set` refuses anything else, and every fire checks again: a timer whose profile is missing, gone from the config, or no longer the profile of that chat **does not fire** (the log says `timer_refused` and why). There is no fallback to the default profile. A timer made before this existed shows as `UNBOUND` in `timer.py list --all`; give it its profile with `timer.py bind TIMER_ID --profile NAME --owner INBOX`. `tests/test_timers.py` checks all of it without a model.
+**A timer holds what it runs as.** Three things are written when it is set and never worked out later: the conversation its reply goes to, the profile every fire runs in, and the inbox that set it. Editing a timer keeps all three. The profile has to be the one that chat resolves to. In a DM that is the profile the inbox is a member of, so a timer set from inside a chat only ever messages an inbox linked to its profile (from a terminal, `--owner` is checked against the profile's members but not against who is in the `--conv` chat: pick the chat whose last human sender is that inbox, or the reply goes to whoever is in the chat you named), and a person with two inboxes has one timer per chat, each reporting to its own. In a group it is the group's own profile if the group is listed, else the setter's; the reply goes to the group only. `set` refuses anything else, and every fire checks again: a timer whose profile is missing, gone from the config, or no longer the profile of that chat **does not fire** (the log says `timer_refused` and why). There is no fallback to the default profile. A timer made before this existed shows as `UNBOUND` in `timer.py list --all`; give it its profile with `timer.py bind TIMER_ID --profile NAME --owner INBOX`. `tests/test_timers.py` checks all of it without a model.
 
 A bot that can run `timer.py` can set a timer in any conversation of this gpette, so give Bash only to profiles you trust with that.
 
