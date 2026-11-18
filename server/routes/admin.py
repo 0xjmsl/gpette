@@ -62,6 +62,7 @@ def setup():
     return jsonify({
         'provider': Config.LLM_SERVICE,
         'daemon': Config.XMTP_DAEMON_URL,
+        'inboxes': __import__('modules.inboxes', fromlist=['status']).status(),
         'workdir': Config.CLAUDE_CODE_CWD,
         'group_workdir': Config.CLAUDE_CODE_GROUP_CWD,
         'allowed_tools': Config.CLAUDE_CODE_ALLOWED_TOOLS,

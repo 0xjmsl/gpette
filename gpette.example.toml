@@ -11,6 +11,10 @@ port = 4849                          # xmtp_daemon's XMTP_WEBHOOK_URL points her
 data_dir = "./data"                  # database, logs, uploads
 read_receipts = true
 timer_check_secs = 60
+stack_secs = 5                       # a chat's turn waits until it has been quiet this long, then its
+                                     # waiting messages are answered together (profiles may override)
+group_reply_secs = 0                 # a bot posts in a group at most once per this many seconds
+                                     # (0 = no limit; profiles may override). README section Group chats
 
 [storage]
 backend = "sqlite"                   # built in; other backends are plug-ins
@@ -41,6 +45,8 @@ group_workdir = "./groups"           # sandbox mode: one empty, tool-less folder
 [sessions]
 routing = "per_conversation"         # per_conversation | shared (every DM resumes one session)
                                      # | per_account (one session per person, see owner_resolver)
+                                     # | fresh (a new session every turn, started with the
+                                     #   summary + latest messages; a profile may set it too)
 owner_resolver = ""                  # per_account: a module with owner_for(inbox_id) -> str | None
                                      # (e.g. the account an inbox belongs to); empty = per inbox
 
@@ -64,7 +70,9 @@ new_people_per_day = 10              # how many new people the password can let 
 messages_per_person_per_day = 0      # 0 = no cap; applies to every gate
 
 [senders]
-resolver = ""                        # a module with resolve(inbox_id, address=None) -> name; empty = short inbox id
+resolver = "publicos"                # "publicos" (built-in: the PublicOS display name, public RPC) · a module with resolve(inbox_id, address=None) -> name · "" = short inbox id
+# rpc = "https://rpc.publicos.dev"   # the built-in lookup's RPC (default)
+# mr_anchor = ""                     # its ModuleRegistry; empty = the PublicOS production chain's
 
 [compaction]
 # Every long chat keeps one running summary, so the model reads the summary plus the
@@ -94,10 +102,22 @@ summary_words = 1000
 # allow_list = "./allowed.txt"
 
 # ---------------------------------------------------------------------------------------------
+# Several inboxes (optional): one xmtp_daemon per inbox, each its own name and picture in chat
+# lists. List them here and bind a profile to each with `inbox = "<name>"`. Inbox ids are read
+# from each daemon's /health; a reply leaves through the inbox its chat belongs to. Without
+# [inboxes], everything goes through [daemon] url. README § Several inboxes.
+#
+# [inboxes.alice]
+# url = "http://127.0.0.1:3111"
+#
+# [profiles.alice]
+# inbox = "alice"                    # answers what arrives at alice (members optional), speaks as alice
+
+# ---------------------------------------------------------------------------------------------
 # Profiles: give some people or groups their own environment. A message is matched by its
 # group chat id first, then by the sender's inbox id; anything unmatched uses the settings above.
 # Every key is optional; missing keys fall back to the sections above.
-# Keys: members, provider, model, workdir, allowed_tools ([] = no tools), system_prompt or
+# Keys: members, inbox (one of [inboxes]), stack_secs, group_reply_secs, provider, model, workdir, allowed_tools ([] = no tools), system_prompt or
 # system_prompt_file (appended for Claude Code; the system prompt for API providers),
 # sessions (per_conversation | shared), gate, tools (Python tools for API providers),
 # max_turns, timeout_secs, privacy, inherit_user_settings, admin, on_error (describe | generic), error_reply. A group chat in no profile runs in its own empty folder under

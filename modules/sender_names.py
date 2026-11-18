@@ -1,13 +1,16 @@
 """Sender display names.
 
-By default gpette does not look names up: a sender is shown by a short inbox id.
-To resolve names (an address book, ENS, your own directory), set in gpette.toml:
+By default gpette looks names up on PublicOS (`resolver = "publicos"`, the built-in
+modules/publicos_names.py: the inbox's PublicOS account and its display name, read
+from the public RPC). Senders without an account show as a short inbox id.
+
+To use your own directory (an address book, ENS, ...), set in gpette.toml:
 
     [senders]
     resolver = "my_package.my_resolver"
 
 That module must define `resolve(inbox_id, address=None) -> str | None`.
-Results are cached in the database for a day.
+`resolver = ""` turns name lookup off. Results are cached in the database for a day.
 """
 import importlib
 import logging
@@ -24,6 +27,8 @@ def _load():
         return _resolver
     _loaded = True
     path = (Config.SENDER_RESOLVER or '').strip()
+    if path == 'publicos':
+        path = 'modules.publicos_names'
     if path:
         try:
             _resolver = getattr(importlib.import_module(path), 'resolve')

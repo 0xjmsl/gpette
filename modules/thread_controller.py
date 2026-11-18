@@ -11,6 +11,8 @@ from modules import transcripts
 
 from utils.message_logger import log_message_flow, truncate_message
 
+STACK_MAX_WAIT = 60      # a chat that never goes quiet still gets its turn after this (s)
+
 class ThreadController:
     def __init__(self, max_continuous_non_user_messages=50):
         self.message_queue = queue.Queue()
@@ -24,6 +26,9 @@ class ThreadController:
         
         # Map to track continuous non-user messages per conversation
         self.conversation_message_counters = {}
+
+        # Stacking: when did the last stackable message of each conversation arrive
+        self._last_arrival = {}
 
         logging.info("ThreadController initialized")
 
@@ -69,6 +74,9 @@ class ThreadController:
             if not value or not value.strip():
                 logging.warning(f"Blocking empty assistant message from queue: conversation={conversation_id}")
                 return
+
+        if self._stackable(message):
+            self._last_arrival[conversation_id] = time.monotonic()
 
         # Add message to queue
         logging.info(f"Adding message to queue: conversation={conversation_id}, role={message.get('role')}")
@@ -126,8 +134,9 @@ class ThreadController:
         conversation_id = message.get('conversationId')
         logging.info(f"Processing message: conversation={conversation_id}, role={message.get('role')}")
 
-        # Store the message in the database (skip Proactive triggers and read receipts - they're ephemeral)
-        if message.get('role') != 'Proactive' and message.get('contentType') != 'readReceipt':
+        # Store the message in the database (skip Proactive triggers and read receipts - they're ephemeral;
+        # a stacked batch was stored message by message already)
+        if message.get('role') != 'Proactive' and message.get('contentType') != 'readReceipt'                 and not message.get('batch'):
             try:
                 self.store_message(message)
             except Exception as e:
@@ -234,6 +243,74 @@ class ThreadController:
                     logging.error(f"Error sending reset confirmation: {e}")
                 break
     
+    # --- stacking --------------------------------------------------------------------
+    # A person's messages are not answered one by one. When a chat's turn comes, the
+    # worker waits until that chat has been quiet for `stack_secs` (the profile's, else
+    # [server] stack_secs; each new message restarts the wait), then takes every later
+    # message of the same chat out of the queue and answers them in ONE turn. Messages
+    # that arrive during the run wait in the queue for the next turn, as before.
+    # A chat is one conversation id, and a group seen by one of several inboxes has its
+    # own id per inbox (modules/inboxes.py), so a batch is always one chat for one bot.
+
+    @staticmethod
+    def _stackable(message):
+        """A person's text message (not a file, a receipt, a tool result or a timer)."""
+        return (message.get('role') == 'user' and bool(message.get('senderInboxId'))
+                and bool(message.get('conversationId'))
+                and message.get('contentType') in (None, '', 'text')
+                and message.get('source', 'SocketIO') == 'SocketIO'
+                and not message.get('batch'))
+
+    def _wait_quiet(self, conversation_id):
+        from config import Config
+        from modules import profiles
+        secs = profiles.setting(conversation_id, 'stack_secs', getattr(Config, 'STACK_SECS', 0))
+        if secs <= 0:
+            return
+        start = time.monotonic()
+        while True:
+            left = self._last_arrival.get(conversation_id, 0) + secs - time.monotonic()
+            if left <= 0 or time.monotonic() - start >= STACK_MAX_WAIT:
+                return
+            time.sleep(min(left, 0.25))
+
+    def _take_stack(self, first):
+        """`first` plus every later stackable message of its chat, taken out of the
+        queue in order. Stops at the chat's first message that cannot be stacked (a
+        file), so the chat's order is kept."""
+        conv = first.get('conversationId')
+        batch = [first]
+        q = self.message_queue
+        with q.mutex:
+            keep = []
+            blocked = False
+            for m in list(q.queue):
+                if not blocked and m.get('conversationId') == conv:
+                    if self._stackable(m):
+                        batch.append(m)
+                        continue
+                    blocked = True
+                keep.append(m)
+            if len(batch) > 1:
+                q.queue.clear()
+                q.queue.extend(keep)
+                q.unfinished_tasks -= len(batch) - 1
+        return batch
+
+    def _stack(self, message):
+        """The message to process: `message` itself, or one message carrying the batch."""
+        conv = message.get('conversationId')
+        self._wait_quiet(conv)
+        batch = self._take_stack(message)
+        if len(batch) == 1:
+            return message
+        for m in batch:
+            self.store_message(m)
+        merged = dict(batch[-1])
+        merged['batch'] = batch
+        logging.info(f"Stacked {len(batch)} messages into one turn: conversation={conv}")
+        return merged
+
     def run(self):
         """Main processing loop for the message queue"""
         logging.info("Starting message processing thread")
@@ -241,6 +318,8 @@ class ThreadController:
             try:
                 message = self.message_queue.get()
                 logging.info(f"Got message from queue: conversation={message.get('conversationId')}, role={message.get('role')}")
+                if self._stackable(message):
+                    message = self._stack(message)
                 self.process_message(message)
             except Exception as e:
                 logging.error(f"Error in message processing loop: {e}")

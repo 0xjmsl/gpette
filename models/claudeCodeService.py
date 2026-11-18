@@ -194,9 +194,16 @@ class ClaudeCodeService(BaseLLMService):
                 "Empty message received", conversation_id, timestamp)
 
         # skip_session: run without resuming, don't prepend context, don't save session
+        fresh = profile is not None and profile.sessions == 'fresh'
         if skip_session:
             session_id = None
             is_new = False  # suppress _build_context — clean slate, just the message
+        elif fresh:
+            # sessions = "fresh": a new session every turn, started like any new
+            # session (summary + latest messages), never resumed or saved, so the
+            # workdir's CLAUDE.md is read again each turn.
+            session_id = None
+            is_new = True
         else:
             session_id = self._find_session(conversation_id, profile)
             is_new = session_id is None
@@ -239,7 +246,7 @@ class ClaudeCodeService(BaseLLMService):
 
         # Don't save the throwaway session when skip_session — preserve original
         new_session_id = result.get("session_id")
-        if new_session_id and not skip_session:
+        if new_session_id and not skip_session and not fresh:
             self._sessions[session_key] = new_session_id
             self._save_sessions()
 

@@ -20,8 +20,11 @@ Every profile key is optional and falls back to the top-level value:
     sessions            per_conversation | shared (every member resumes one session) |
                         per_account (one session per sender's owner: [sessions] owner_resolver,
                         e.g. the account behind an inbox, so a person's inboxes share one
-                        conversation memory; groups stay per conversation)
-    gate                open | password | <plug-in module>
+                        conversation memory; groups stay per conversation) |
+                        fresh (every turn is a new session that starts with the summary and
+                        the latest chat messages; nothing is resumed, so a changed CLAUDE.md
+                        is read on the very next turn)
+    gate               open | password | <plug-in module>
     tools               Python tools (./tools) an API provider may call; [] = none
     max_turns, timeout_secs   Claude Code limits
     privacy             true = never reveal paths, user names, machine or config details
@@ -40,7 +43,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from config import Config, ALL_CLAUDE_TOOLS
-from modules import admin_menu
+from modules import admin_menu, inboxes
 
 DEFAULT = 'default'
 GROUP = 'group'
@@ -70,6 +73,7 @@ class Profile:
     admin: bool = False                   # /menu, and errors described in full (modules/admin_menu.py)
     on_error: str = 'generic'             # describe | generic: how a failed model run is answered
     error_reply: str = ''                 # generic: the text sent ('' = the built-in one)
+    inbox: str = ''                       # [inboxes.<name>] this profile speaks through ('' = any)
 
     def session_key(self, conversation_id):
         """Where this conversation's Claude Code session id is stored."""
@@ -195,7 +199,7 @@ def _from_config(name, raw):
         p.max_turns = int(raw['max_turns'])
     if raw.get('timeout_secs') is not None:
         p.timeout_secs = int(raw['timeout_secs'])
-    if p.sessions not in ('per_conversation', 'shared', 'per_account'):
+    if p.sessions not in ('per_conversation', 'shared', 'per_account', 'fresh'):
         logging.warning(f"profile '{name}': sessions='{p.sessions}' unknown, using per_conversation")
         p.sessions = 'per_conversation'
     if 'admin' in raw:
@@ -205,6 +209,7 @@ def _from_config(name, raw):
         logging.warning(f"profile '{name}': on_error='{p.on_error}' unknown, using generic")
         p.on_error = 'generic'
     p.error_reply = str(raw.get('error_reply') or '')
+    p.inbox = _inbox_of(raw)
     return admin_menu.apply_overrides(p)
 
 
@@ -213,14 +218,44 @@ def base_profile(is_group):
     return _base(GROUP if is_group else DEFAULT, is_group)
 
 
-def _match(member_id):
+def _inbox_of(raw):
+    return str(raw.get('inbox') or '').strip()
+
+
+def _match_in(member_id, names):
     key = _norm(member_id)
     if not key:
         return None
-    for name, raw in (Config.PROFILES or {}).items():
-        if any(_norm(m) == key for m in (raw.get('members') or [])):
+    for name in names:
+        if any(_norm(m) == key for m in (Config.PROFILES[name].get('members') or [])):
             return name
     return None
+
+
+def _match(member_id):
+    return _match_in(member_id, list(Config.PROFILES or {}))
+
+
+def _pick(conversation_id, sender_inbox_id, is_group, inbox=None):
+    """The profile name for a chat, or None (= default / group sandbox).
+
+    No inbox known (one daemon, or no [inboxes]): every profile, group id first,
+    then sender. A known inbox (the configured name of the inbox that received
+    the message, or that owns the conversation): first the profiles bound to it
+    (group id, sender, then a bound profile with no members, which answers
+    everyone who writes to that inbox), then the profiles bound to no inbox."""
+    profiles = Config.PROFILES or {}
+    conversation_id = inboxes.base_conversation(conversation_id)   # `<group>@<inbox>` -> the group id
+    if not inbox:
+        return (_match(conversation_id) if is_group else None) or _match(sender_inbox_id)
+    bound = [n for n, r in profiles.items() if _inbox_of(r) == inbox]
+    unbound = [n for n, r in profiles.items() if not _inbox_of(r)]
+    name = ((_match_in(conversation_id, bound) if is_group else None)
+            or _match_in(sender_inbox_id, bound)
+            or next((n for n in bound if not profiles[n].get('members')), None))
+    if name:
+        return name
+    return (_match_in(conversation_id, unbound) if is_group else None) or _match_in(sender_inbox_id, unbound)
 
 
 _owner_fn = None
@@ -259,11 +294,20 @@ def owner_for(inbox_id):
     return owner
 
 
-def resolve_profile(conversation_id, sender_inbox_id, kind):
+def resolve_profile(conversation_id, sender_inbox_id, kind, inbox_id=None):
     """The profile for a message: its group id first, then its sender, else
-    `default` (DM) or the `group` sandbox (group)."""
+    `default` (DM) or the `group` sandbox (group). `inbox_id` is the inbox that
+    received it (the envelope's `inboxId`); with [inboxes] it limits the match
+    to the profiles bound to that inbox first (modules/inboxes.py)."""
     is_group = kind == 'group'
-    name = (_match(conversation_id) if is_group else None) or _match(sender_inbox_id)
+    inbox = None
+    if inboxes.configured():
+        inbox = inboxes.split(conversation_id)[1] or (inboxes.name_of(inbox_id) if inbox_id else None)
+        if inbox:
+            inboxes.note(conversation_id, inbox)
+        else:
+            inbox = inboxes.of_conversation(conversation_id)
+    name = _pick(conversation_id, sender_inbox_id, is_group, inbox)
     if name:
         profile = _from_config(name, Config.PROFILES[name])
     else:
@@ -324,12 +368,15 @@ def check_timer_binding(name, owner_inbox, conversation_id, is_group):
         return "it has no profile (bind it: scripts/timer.py bind)"
     if name not in (Config.PROFILES or {}) and name not in (DEFAULT, GROUP):
         return f"its profile '{name}' is not in the config"
-    if is_group:
-        expected = _match(conversation_id) or _match(owner_inbox) or GROUP
-    else:
-        if not _norm(owner_inbox):
-            return "it has no inbox (a timer in a DM reports to one inbox)"
-        expected = _match(owner_inbox) or DEFAULT
+    inbox = None
+    if inboxes.configured():
+        bound = _inbox_of((Config.PROFILES or {}).get(name) or {})
+        inbox = inboxes.split(conversation_id)[1] or inboxes.of_conversation(conversation_id) or bound or None
+        if bound and inbox != bound:
+            return f"this chat belongs to inbox '{inbox}', but profile '{name}' speaks through '{bound}'"
+    if not is_group and not _norm(owner_inbox):
+        return "it has no inbox (a timer in a DM reports to one inbox)"
+    expected = _pick(conversation_id, owner_inbox, is_group, inbox) or (GROUP if is_group else DEFAULT)
     if expected != name:
         who = 'this group' if is_group else f"inbox {_norm(owner_inbox)[:12]}..."
         return f"{who} belongs to profile '{expected}', not '{name}'"
@@ -348,6 +395,8 @@ def profile_for_timer(timer, is_group):
         profile = _from_config(name, Config.PROFILES[name])
     else:
         profile = _base(name, is_group)
+    if profile.inbox:
+        inboxes.note(conversation_id, profile.inbox)    # its reply leaves through that inbox
     if profile.sessions == 'per_account':
         if is_group:
             profile.sessions = 'per_conversation'
@@ -387,6 +436,19 @@ def profile_for_conversation(conversation_id, kind=None, conversation_db=None):
         except Exception as e:
             logging.error(f"profiles: history lookup failed for {conversation_id}: {e}")
     return resolve_profile(conversation_id, sender, kind or 'dm')
+
+
+def setting(conversation_id, key, default):
+    """A per-profile number (`stack_secs`, `group_reply_secs`) for the profile this
+    conversation last resolved to, else `default` (the [server] value)."""
+    with _last_lock:
+        known = _last.get(conversation_id)
+    raw = (Config.PROFILES or {}).get(known[0]) if known else None
+    value = raw.get(key) if raw else None
+    try:
+        return float(value if value is not None else default)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def workdir_for(profile, conversation_id):

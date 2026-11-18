@@ -183,7 +183,7 @@ XMTP_WEBHOOK_URL=http://127.0.0.1:4849 ./xmtp_daemon</code></pre>
 <tr><td><code>[sessions]</code></td><td><code>routing</code>: per chat, shared, or per person; <code>owner_resolver</code></td></tr>
 <tr><td><code>[filter]</code></td><td>who this gpette answers (rules)</td></tr>
 <tr><td><code>[gate]</code></td><td>who may talk: <code>kind</code>, <code>password</code>, caps</td></tr>
-<tr><td><code>[senders]</code></td><td>a module that turns inbox ids into names</td></tr>
+<tr><td><code>[senders]</code></td><td>how inbox ids become names: <code>"publicos"</code> (default, the PublicOS display name from the public RPC), your own module, or <code>""</code> for a short inbox id</td></tr>
 <tr><td><code>[compaction]</code></td><td>running summaries for long chats; <code>[compaction.claude_code]</code> for Claude Code sessions</td></tr>
 <tr><td><code>[storage]</code></td><td><code>sqlite</code> (built in) or a plug-in</td></tr>
 <tr><td><code>[profiles.&lt;name&gt;]</code></td><td>an environment for listed people or groups</td></tr>
@@ -370,7 +370,7 @@ inboxes = ["&lt;owner inbox id&gt;"]               inboxes = ["&lt;owner inbox i
 <tr><th>Kind</th><th>Config</th><th>The module provides</th></tr>
 <tr><td>Gate</td><td><code>[gate] kind = "pkg.mod"</code></td><td><code>class Gate</code> with <code>check_message(message, kind=None)</code> → <code>{"action": "allow"}</code> or <code>{"action": "reject"}</code></td></tr>
 <tr><td>Who a person is</td><td><code>[sessions] owner_resolver</code></td><td><code>owner_for(inbox_id)</code> → a stable id (e.g. an account) or <code>None</code></td></tr>
-<tr><td>Sender names</td><td><code>[senders] resolver</code></td><td><code>resolve(inbox_id, address=None)</code> → a name or <code>None</code></td></tr>
+<tr><td>Sender names</td><td><code>[senders] resolver</code> (default <code>"publicos"</code>)</td><td><code>resolve(inbox_id, address=None)</code> → a name or <code>None</code></td></tr>
 <tr><td>Storage</td><td><code>[storage] backend</code></td><td><code>class ConversationDB</code> with the SQLite one's methods</td></tr>
 </table>
 <pre><code># mygate.py: answer only listed inboxes

@@ -9,7 +9,7 @@ XMTP network <-> xmtp_daemon --POST /api/xmtp/incoming--> gpette --> LLM
                              <--------POST /send---------
 ```
 
-One bot, an owner/public split of one identity, several bots on one machine, mixed models: see [SETUPS.md](SETUPS.md).
+One bot, an owner/public split of one identity, several bots on one machine, several inboxes behind one gpette, mixed models: see [SETUPS.md](SETUPS.md).
 
 > **What this is.** This is the small server we run our own XMTP bots on, shared as it is. It does what we need and stays simple: one process, SQLite, a config file. There are far more capable agent frameworks and bot tools out there; if you need scale, orchestration or a polished product, start with those. If you want something you can read in an afternoon and bend to your own setup, this may fit.
 
@@ -62,6 +62,8 @@ A session grows with every message, and a big session makes every turn slower an
 
 `routing = "per_account"` keeps one session per person instead of per chat: the same person writing from two inboxes (or two chats) continues one conversation. Who a person is comes from `[sessions] owner_resolver`, a module with `owner_for(inbox_id) -> str | None` (for example the account an inbox belongs to). Without one, each inbox is its own person. Groups always keep one session per group.
 
+`sessions = "fresh"` (on a profile, or as `routing`) resumes nothing: every turn is a new session that starts the way any new session does, with the summary and the latest chat messages. Use it for bots whose instructions (the workdir's `CLAUDE.md`) change while they run: Claude Code reads `CLAUDE.md` only when a session starts, so a resumed session keeps following the old one. Memory then lives in the chat history and in whatever files the bot keeps.
+
 A user can start over by sending `/reset`, `reset conversation`, `fresh start` or `new session`: the session and the summary are dropped, and nothing earlier is carried over.
 
 ## Profiles
@@ -69,6 +71,40 @@ A user can start over by sending `/reset`, `reset conversation`, `fresh start` o
 A profile gives some people or groups their own environment: provider, model, folder, tools, prompt, session routing and gate. Declare it as `[profiles.<name>]` with a `members` list of inbox ids and group conversation ids.
 
 A message is matched by its group id first, then by the sender's inbox id. Anything unmatched uses the top-level settings. Every key is optional. See the end of `gpette.example.toml` for the full list.
+
+With [several inboxes](#several-inboxes), `inbox = "<name>"` binds a profile to one of them: it answers only what arrives at that inbox, and speaks through it.
+
+## Several inboxes
+
+One gpette can sit behind several XMTP inboxes, each with its own name and picture in people's chat lists: a team of bots, one brain. Run one xmtp_daemon per inbox (xmtp_daemon README § Several inboxes; each its own folder and port, all with the same `XMTP_WEBHOOK_URL`), then list them and bind a profile to each:
+
+```toml
+[inboxes.alice]
+url = "http://127.0.0.1:3111"       # alice's daemon
+
+[inboxes.bob]
+url = "http://127.0.0.1:3112"
+
+[profiles.alice]
+inbox = "alice"                     # answers what arrives at alice, speaks as alice
+workdir = "./profiles/alice"
+
+[profiles.bob]
+inbox = "bob"
+members = ["<your inbox id>"]       # optional: bob answers only you
+workdir = "./profiles/bob"
+```
+
+That is all. You never write an inbox id: gpette asks each daemon for its own (`/health`) and logs it at start (`inbox 'alice': http://127.0.0.1:3111 = 4f2a…`).
+
+How a message finds its way:
+
+- **It arrives.** The daemon says which inbox received it. Only the profiles bound to that inbox are tried, by group id and then by sender; a bound profile with no `members` answers everyone who writes to that inbox. Profiles with no `inbox` are tried after them, then the default. So you can write to alice and to bob from the same account and get two different bots, in two different chats.
+- **It leaves.** A reply goes out through the inbox its chat belongs to. gpette learns that from the first message it gets in the chat, or from the timer that fires there, and keeps it in `<data_dir>/conversation_inboxes.json`. A chat it knows nothing about goes out through `[daemon] url`.
+- **Several of your inboxes in one group** is fine: inside gpette each inbox has its own copy of the group, with the id `<group id>@<inbox name>` (its own history, session, profile and timers; list the plain group id in `members`), and each answer leaves through its own inbox. Pace them with `group_reply_secs` ([Group chats](#group-chats)).
+- **A bot that writes first** (a timer that reports to you, a hello): open the chat from its inbox with the daemon's `POST /dm` (`{"inboxId": "<yours>"}` returns the `conversationId`), then set the timer in that conversation with the bound profile (`timer.py set … --conv <id> --profile alice --owner <your inbox id>`). The first fire goes out as alice.
+
+gpette refuses to start if a profile names an inbox that is not under `[inboxes]`, or an inbox has no `url`. A config with no `[inboxes]` works exactly as before. The admin panel lists each inbox and its id. `tests/test_inboxes.py` checks all of the above with fake daemons, no model and no XMTP.
 
 ## The menu and errors
 
@@ -82,7 +118,13 @@ A message gpette crashes on is dropped, not retried: the webhook answers the dae
 
 A group that is in no profile runs in its own empty folder under `[claude_code] group_workdir`, with no tools at all. Set `[claude_code] groups = "default"` to give every such group the top-level folder and tools instead (still one session per group). In groups, each message is prefixed with the sender's name so the model knows who spoke. List a group in a profile to give it more.
 
-Sender names come from an optional plug-in (`[senders] resolver`, a module with `resolve(inbox_id, address=None)`). Without one, senders show as a short inbox id.
+Sender names are looked up on [PublicOS](https://publicos.dev) by default: an XMTP inbox that belongs to a PublicOS account shows as that account's display name, read with two calls to the public RPC (no key, no account). Senders without one show as a short inbox id. Point `[senders] resolver` at your own module (`resolve(inbox_id, address=None)` returning a name or `None`) to use another directory, or set it to `""` to turn lookup off; `[senders] rpc` and `mr_anchor` change where the built-in lookup reads.
+
+**A bot does not have to answer in a group.** Every group turn ends with a line telling the bot whether it may post now; if it answers exactly `[NO_REPLY]`, nothing is sent. **`group_reply_secs`** (`[server]`, or per profile) lets a bot post in a group at most once per that many seconds (0, the default, = no limit). A bot that may not post is still run when new messages arrive, so it can read and act with its tools; only its answer is held back, and the turn's line says until when. The time of each post is kept in `<data_dir>/group_posts.json`. A DM always gets its answer.
+
+## Stacking: several messages, one turn
+
+People often send many short messages instead of one long one. gpette answers them together: when a chat's turn comes, it waits until the chat has been quiet for **`stack_secs`** (`[server]`, default 5; a profile may set its own, 0 = no wait), each new message restarting the wait, and then hands every waiting message of that chat to the bot as one turn (in a group, each line starts with its sender's name). A message that arrives while the bot is running waits for the next turn. Files and timer fires are never stacked; a file keeps its place in the chat's order. `tests/test_stacking.py` checks it without a model.
 
 ## Gates
 
@@ -111,7 +153,7 @@ Its main use: **one inbox, two machines.** XMTP lets one inbox run several insta
 
 ## Timers
 
-The model can set reminders that fire later. When a timer fires, the model gets a message that starts with `Timer fired:` plus the instructions it wrote. If it answers exactly `[NO_REPLY]`, nothing is sent. This lets a timer do quiet work.
+The model can set reminders that fire later. When a timer fires, the model gets a message that starts with `Timer fired:` plus the instructions it wrote. If it answers exactly `[NO_REPLY]`, nothing is sent. This lets a timer do quiet work. (A group turn may answer `[NO_REPLY]` too; a DM never: a person who writes gets an answer.)
 
 Timers are Python tools (`setTimer`, `listTimers`, `editTimer`, `cancelTimer`), so API providers can set them. Claude Code cannot call Python tools; a Claude Code profile that may run Bash uses the command line instead:
 
@@ -178,6 +220,8 @@ It prints one row per step: pass or fail, the reply, and the turns, cost and den
 - The daemon must run on the same machine: the incoming routes only accept local callers.
 - Claude Code profiles cannot use the Python tools. For timers they run `scripts/timer.py` (needs Bash).
 - One process, one SQLite file. Other storage needs a plug-in.
+- **One run at a time, for every chat and every inbox.** Messages wait in one queue; a message never interrupts a run (a chat's waiting messages are answered together, [Stacking](#stacking-several-messages-one-turn)). With [several inboxes](#several-inboxes) this means a long run of one bot delays every other bot's answers and timers.
+- **Bots that talk to each other in a group** each get a turn for every new stack of messages. Use `group_reply_secs` and tell them to answer `[NO_REPLY]` when they have nothing to add, or the conversation never ends.
 - XMTP network changes are the daemon's concern. Read its README.
 
 ## License

@@ -1,6 +1,6 @@
 # Setups
 
-Four shapes gpette is built and tested for. Each is one `gpette.toml` (or two) plus one
+Five shapes gpette is built and tested for. Each is one `gpette.toml` (or two) plus one
 `xmtp_daemon` (or two). The words:
 
 - **identity**: one XMTP inbox, made from one key. People message an identity.
@@ -49,7 +49,27 @@ Each daemon's `XMTP_WEBHOOK_URL` points at its own gpette. Everything listens on
 to look at an admin panel from elsewhere, put a reverse proxy with authentication in front
 (one subdomain per bot works well) and keep the panel itself local.
 
-## 4. Mixed models
+## 4. Several inboxes, one gpette
+
+A team of bots that share one brain: each has its own inbox (its own name and picture in your
+chat list), and one gpette answers for all of them, each with its own profile, folder and
+prompt. Use this instead of 3 when the bots belong together (a cast of characters, agents
+that report to you one chat each); use 3 when they are separate products.
+
+- One daemon per inbox, each its own folder and port, all with `XMTP_WEBHOOK_URL` at the one
+  gpette (xmtp_daemon README § Several inboxes has a systemd template).
+- In `gpette.toml`, one `[inboxes.<name>]` with the daemon's `url` per inbox, and
+  `inbox = "<name>"` on each bot's profile (README § Several inboxes).
+- The same person can talk to every bot; each conversation stays with the inbox it was
+  started on, and the reply always leaves through that inbox.
+- They can share a group: each has its own copy of it inside gpette and answers as itself.
+  Give them `group_reply_secs` and tell them about `[NO_REPLY]` (README § Group chats), or
+  bots answering bots never stop.
+
+Tested: `tests/test_inboxes.py` (offline, three fake daemons). Live: ten agents on one gpette,
+each reporting to its owner from its own inbox.
+
+## 5. Mixed models
 
 Profiles can use different providers on one bot: Claude Code for you, a local LM Studio model
 for a group of friends, an API model for everyone else. Set `provider` (and `model`) per

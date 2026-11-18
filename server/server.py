@@ -44,6 +44,12 @@ def create_server(config_class):
     # points at a provider whose API key is missing — surfaces misconfig
     # loudly instead of silently failing on the first compaction call.
     validate_compaction_config()
+    # [inboxes]: every profile's inbox exists and every inbox has a url.
+    from modules import inboxes
+    inboxes.check_config()
+    for _name in Config.INBOXES:
+        _id = inboxes.inbox_id_of(_name)
+        logging.info(f"inbox '{_name}': {inboxes.url_of(_name)} = {(_id[:12] + '...') if _id else 'NOT ANSWERING (read again when needed)'}")
 
     server = Flask(__name__)
     server.config.from_object(config_class)
@@ -104,6 +110,18 @@ def create_server(config_class):
             return
 
         conv_db = ConversationDB()
+        # [inboxes]: each of our inboxes in this group has its own copy of the chat
+        # (`<group>@<inbox>`, modules/inboxes.py); update every copy we already know.
+        from modules import inboxes
+        keys = [conversation_id]
+        if inboxes.configured():
+            keys = [k for k in (inboxes.group_key(conversation_id, n) for n in Config.INBOXES)
+                    if conv_db.is_group_conversation(k)] or keys
+        for key in keys:
+            _register_group_members(conv_db, key, members)
+        logging.info(f"Group members updated for {conversation_id}: {len(members)} members")
+
+    def _register_group_members(conv_db, conversation_id, members):
         conv_db.track_conversation(conversation_id, is_group=True)
 
         for member in members:
@@ -118,8 +136,6 @@ def create_server(config_class):
         # Membership may have changed — drop cached group-auth decision so the
         # next message re-evaluates the participant intersection.
         invalidate_gate_cache(conversation_id)
-
-        logging.info(f"Group members updated for {conversation_id}: {len(members)} members")
 
     @socketio.on('incoming_message')
     def handle_incoming_message(data):
@@ -139,6 +155,16 @@ def create_server(config_class):
             logging.warning(f"Dropping message without kind: conversation={standardized_message.get('conversationId')}")
             return
 
+        # [inboxes]: a group message that arrived at one of our inboxes becomes that
+        # inbox's own copy of the chat, `<group>@<inbox>` (modules/inboxes.py), so two
+        # of our bots in one group never share a session, a profile or a reply path.
+        from modules import inboxes
+        if kind == 'group' and inboxes.configured():
+            _name = inboxes.name_of(standardized_message.get('inboxId'))
+            if _name:
+                standardized_message['conversationId'] = inboxes.group_key(
+                    standardized_message['conversationId'], _name)
+
         # Commit the conversation's classification + participants before the
         # security check, so the gate evaluates against current state.
         conversation_db.commit_conversation(
@@ -149,7 +175,7 @@ def create_server(config_class):
 
         # Who this gpette answers ([filter] rules), before anything else: a message
         # another installation of this inbox serves is dropped here, silently.
-        verdict, rule = message_filter.decide(standardized_message.get('conversationId'),
+        verdict, rule = message_filter.decide(inboxes.base_conversation(standardized_message.get('conversationId')),
                                               standardized_message.get('senderInboxId'), kind)
         if verdict == 'ignore':
             logging.info(f"Filter: ignored {standardized_message.get('senderInboxId')} in "
@@ -160,7 +186,8 @@ def create_server(config_class):
         # Access gate - first thing after standardization. The message's profile
         # (group id, then sender) picks the gate; no profile gate = [gate] kind.
         profile = resolve_profile(standardized_message.get('conversationId'),
-                                  standardized_message.get('senderInboxId'), kind)
+                                  standardized_message.get('senderInboxId'), kind,
+                                  standardized_message.get('inboxId'))
         gate = get_gate(profile.gate, conversation_db)
         auth_result = gate.check_message(standardized_message, kind=kind)
         route_log.note(standardized_message, kind, profile,
@@ -370,6 +397,8 @@ def standardize_message(data):
         'source': data.get('source', 'SocketIO'),
         'conversationId': conversation_id,
         'senderInboxId': sender_inbox_id,
+        # The inbox that received it (xmtp_daemon's envelope; one daemon per inbox).
+        'inboxId': data.get('inboxId'),
         'contentType': data.get('contentType'),
         # Conversation classification filled at the source by xmtp_daemon —
         # 'dm' | 'group'. The envelope carries kind so no layer has to infer it

@@ -14,8 +14,10 @@ from models.conversation_db import ConversationDB
 from modules import sender_names
 from memory.manager import MemoryManager
 from modules.profiles import resolve_profile, profile_for_conversation, profile_for_timer
+from modules import group_pace
 
-# A timer fire that answers exactly this sends nothing back (see _handle_proactive_message).
+# A timer fire or a group turn that answers exactly this sends nothing back.
+# A DM always gets its answer.
 NO_REPLY_TOKEN = "[NO_REPLY]"
 
 
@@ -130,9 +132,9 @@ class ChatController:
                         if isinstance(content, dict) and content.get('type') == 'text':
                             content['value'] = f"{sender_name}: {content['value']}"
 
-            # Prefix current message
+            # Prefix current message (a stacked batch carries its own per-line names)
             sender_inbox = message.get('senderInboxId')
-            if sender_inbox:
+            if sender_inbox and not message.get('prefixed'):
                 sender_name, _ = self._resolve_sender_name(sender_inbox)
                 if sender_name:
                     participant_names.add(sender_name)
@@ -199,9 +201,15 @@ class ChatController:
             service = self._service_for(profile)
             conversation_history = self.thread_controller.get_chat_history(
                 conversation_id, limit=Config.COMPACTION_AFTER + 20)
-            # Exclude the last message (the current user input) from history —
-            # it will be passed separately to send_message()
-            conversation_history = conversation_history[:-1] if conversation_history else []
+            # Exclude the current user input from history — it is passed separately
+            # to send_message(). A stacked batch (thread_controller) is N stored messages.
+            batch = message.get("batch") or []
+            drop = max(len(batch), 1)
+            conversation_history = conversation_history[:-drop] if conversation_history else []
+            if batch:
+                self._merge_batch(message, batch, is_group)
+            if is_group and message.get("role") == "user":
+                self._append_text(message, group_pace.note(conversation_id))
 
             # The saved summary always applies; a fold (a model call) never runs mid tool loop.
             conversation_history, context_note = compact_context(
@@ -238,6 +246,10 @@ class ChatController:
                 is_group=is_group,
                 profile=profile,
             )
+            # A group answer: [NO_REPLY] sends nothing, and a bot that posted there
+            # less than group_reply_secs ago is held back (its tools already ran).
+            if is_group and not service_response.get("tool_calls") and                     not self._group_may_send(conversation_id, service_response.get("content"), "group_turn"):
+                return None
             now = datetime.datetime.now()
             timestamp = int(now.timestamp() * 1000)
             final_response = {
@@ -317,6 +329,8 @@ class ChatController:
                              f"timer={timer_data.get('timer_id')} profile={profile.name} skip_session={skip_session}")
 
             context_text = self._format_timer_context(timer_data)
+            if is_group:
+                context_text += "\n\n" + group_pace.note(conversation_id)
 
             now = datetime.datetime.now()
             ts_ms = int(now.timestamp() * 1000)
@@ -386,6 +400,8 @@ class ChatController:
                 log_message_flow("ChatController", "SYSTEM", "timer_no_reply", conversation_id,
                                  f"timer={timer_data.get('timer_id')} answered {NO_REPLY_TOKEN}, nothing sent")
                 return None
+            if is_group and not self._group_may_send(conversation_id, service_response.get("content"), "timer"):
+                return None
 
             ts_response = int(datetime.datetime.now().timestamp() * 1000)
             final_response = {
@@ -413,6 +429,39 @@ class ChatController:
         except Exception as e:
             log_message_flow("ChatController", "SYSTEM", "proactive_error", None, str(e))
             return None
+
+    def _group_may_send(self, conversation_id, content, what):
+        """True (and the post is counted) when a group answer goes out."""
+        if self._is_no_reply(content):
+            log_message_flow("ChatController", "SYSTEM", f"{what}_no_reply", conversation_id,
+                             f"answered {NO_REPLY_TOKEN}, nothing sent")
+            return False
+        if not group_pace.allowed(conversation_id):
+            log_message_flow("ChatController", "SYSTEM", f"{what}_held", conversation_id,
+                             "posted here less than group_reply_secs ago: answer not sent")
+            return False
+        group_pace.mark(conversation_id)
+        return True
+
+    def _merge_batch(self, message, batch, is_group):
+        """Several messages of one chat answered in one turn: one text, in order.
+        In a group each line starts with its sender's name."""
+        lines = []
+        for m in batch:
+            c = m.get("content")
+            text = c.get("value", "") if isinstance(c, dict) else str(c or "")
+            if is_group:
+                name, _ = self._resolve_sender_name(m.get("senderInboxId"))
+                text = f"{name or 'someone'}: {text}"
+            lines.append(text)
+        message["content"] = {"type": "text", "value": "\n".join(lines)}
+        message["prefixed"] = is_group
+
+    @staticmethod
+    def _append_text(message, line):
+        c = message.get("content")
+        if isinstance(c, dict) and c.get("type") == "text":
+            message["content"] = {**c, "value": f"{c.get('value', '')}\n\n{line}"}
 
     @staticmethod
     def _is_no_reply(content) -> bool:

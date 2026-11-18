@@ -6,8 +6,9 @@ Daemon -> gpette (LOCALHOST ONLY: these routes inject XMTP traffic):
   POST /api/xmtp/group_members  a group's member list
 
 gpette -> daemon:
-  send_via_daemon(message) POSTs the outgoing message dict to
-  {daemon.url}/send.
+  send_via_daemon(message) POSTs the outgoing message dict to {url}/send,
+  where url is the daemon of the conversation's inbox ([inboxes], see
+  modules/inboxes.py), else [daemon] url.
 """
 import logging
 import time
@@ -16,6 +17,7 @@ import requests
 from flask import jsonify, request
 
 from config import Config
+from modules import inboxes
 
 _LOCAL = {"127.0.0.1", "::1", "localhost"}
 
@@ -78,7 +80,12 @@ def send_via_daemon(message, attempts=3):
     """POST one outgoing message to the daemon. A few quick retries cover a
     daemon restart; a 4xx means the message itself is bad, so no retry.
     Returns the XMTP message id, or None."""
-    url = f"{Config.XMTP_DAEMON_URL}/send"
+    # The daemon of the inbox this conversation belongs to ([inboxes]), else [daemon] url;
+    # a group seen by one of several inboxes (`<group>@<inbox>`) leaves as the plain group id.
+    daemon, xmtp_conv = inboxes.route(message.get('conversationId'))
+    if xmtp_conv != message.get('conversationId'):
+        message = {**message, 'conversationId': xmtp_conv}
+    url = f"{daemon}/send"
     delay = 1
     for i in range(attempts):
         try:

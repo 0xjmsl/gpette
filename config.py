@@ -75,6 +75,9 @@ class Config:
     SERVER_RESTART_INTERVAL = 3600
     SEND_READ_RECEIPTS = True
     PROACTIVE_CHECK_INTERVAL = 60             # how often due timers are checked (s)
+    STACK_SECS = 5                            # a chat's turn waits until it has been quiet this long; the
+                                              # messages that arrived meanwhile are answered together
+    GROUP_REPLY_SECS = 0                      # a bot posts in a group at most once per this many seconds (0 = no limit)
 
     # --- storage ---------------------------------------------------------------------
     STORAGE_BACKEND = 'sqlite'                 # 'sqlite' (built in) or a plug-in name
@@ -128,6 +131,10 @@ class Config:
     # --- profiles (filled from [profiles.*]) -------------------------------------------
     PROFILES = {}
 
+    # --- several inboxes (filled from [inboxes.*]; see modules/inboxes.py) ---------------
+    # name -> {"url": its xmtp_daemon}. Empty = one inbox, the [daemon] url.
+    INBOXES = {}
+
     # --- plug-in settings (filled from [plugins.*]; see plugin_settings) ----------------
     PLUGINS = {}
 
@@ -163,10 +170,13 @@ class Config:
     ANTROKEY = os.getenv('ANTHROPIC_API_KEY', '') or os.getenv('ANTHROPICS_API_KEY', '')
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 
-    # --- sender names (optional plug-in) -----------------------------------------------
-    # A dotted module path whose `resolve(inbox_id, address=None)` returns a display
-    # name or None. Empty = no resolution (senders show as a short inbox id).
-    SENDER_RESOLVER = ''
+    # --- sender names -------------------------------------------------------------------
+    # "publicos" (default) = the built-in PublicOS lookup (modules/publicos_names.py), or a
+    # dotted module path whose `resolve(inbox_id, address=None)` returns a display name or
+    # None. Empty = no resolution (senders show as a short inbox id).
+    SENDER_RESOLVER = 'publicos'
+    SENDER_RPC = ''        # the built-in lookup's RPC; empty = https://rpc.publicos.dev
+    SENDER_MR_ANCHOR = ''  # its ModuleRegistry; empty = the PublicOS production chain's
 
     @staticmethod
     def init_app(app):
@@ -183,6 +193,8 @@ _MAP = {
     'server.data_dir': ('DATA_DIR', True),
     'server.read_receipts': ('SEND_READ_RECEIPTS', False),
     'server.timer_check_secs': ('PROACTIVE_CHECK_INTERVAL', False),
+    'server.stack_secs': ('STACK_SECS', False),
+    'server.group_reply_secs': ('GROUP_REPLY_SECS', False),
     'storage.backend': ('STORAGE_BACKEND', False),
     'storage.path': ('STORAGE_PATH', True),
     'llm.provider': ('LLM_SERVICE', False),
@@ -210,6 +222,8 @@ _MAP = {
     'sessions.thread_joins': ('THREAD_JOINS', False),
     'sessions.owner_resolver': ('SESSION_OWNER_RESOLVER', False),
     'senders.resolver': ('SENDER_RESOLVER', False),
+    'senders.rpc': ('SENDER_RPC', False),
+    'senders.mr_anchor': ('SENDER_MR_ANCHOR', False),
     'gate.kind': ('GATE_KIND', False),
     'gate.password': ('GATE_PASSWORD', False),
     'gate.welcome': ('GATE_WELCOME', False),
@@ -256,6 +270,9 @@ def _apply(cfg):
             if p.get(key):
                 p[key] = _abs(p[key])
         Config.PROFILES[name] = p
+    # kept as written: modules/inboxes.check_config() refuses a bad entry at boot
+    Config.INBOXES = {name: (dict(v) if isinstance(v, dict) else v)
+                      for name, v in (_get(cfg, 'inboxes', {}) or {}).items()}
     Config.PLUGINS = {name: dict(v) for name, v in (_get(cfg, 'plugins', {}) or {}).items()
                       if isinstance(v, dict)}
     Config.FILTER = dict(_get(cfg, 'filter', {}) or {})

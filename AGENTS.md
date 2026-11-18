@@ -34,6 +34,7 @@ Notes for AI agents that set up, run or extend gpette. Read README.md first for 
 | A profile is not used | Its `members` must hold the exact inbox id or group conversation id (case and `0x` do not matter). Group id wins over sender. |
 | A group gets no tools | Expected: groups outside a profile run tool-less. Add the group id to a profile. |
 | A timer fired but nothing was sent | The model answered `[NO_REPLY]`. That is by design. |
+| A reply leaves through the wrong inbox, or a message at one inbox gets another bot | `[inboxes]`: each profile's `inbox` must name its daemon; the log line at start shows every inbox's id (`NOT ANSWERING` = that daemon is down). Which chat belongs to which inbox: `<data_dir>/conversation_inboxes.json`. A daemon older than the `inboxId` field cannot say which inbox received a message: update it. |
 | A timer never fires, the log says `timer_refused` | The timer has no profile, its profile left the config, or its inbox is no longer a member of it. `python scripts/timer.py list --all` shows it; `timer.py bind` repairs it. |
 | Where did a message go? | `http://127.0.0.1:<port>/admin` (this machine only): each conversation's filter rule, profile, gate decision and session; the "who would handle this?" box predicts it without sending. Raw: `<data_dir>/routes.jsonl`. |
 | A message is ignored with no gate line in the log | Look for `Filter: ignored … (<rule>)`: a `[filter]` rule (or `default = "ignore"`) dropped it before the gate. Expected when another installation of the same inbox serves that person. |
