@@ -153,7 +153,7 @@ Its main use: **one inbox, two machines.** XMTP lets one inbox run several insta
 
 ## Timers
 
-The model can set reminders that fire later. When a timer fires, the model gets a message that starts with `Timer fired:` plus the instructions it wrote. If it answers exactly `[NO_REPLY]`, nothing is sent. This lets a timer do quiet work. (A group turn may answer `[NO_REPLY]` too; a DM never: a person who writes gets an answer.)
+The model can set reminders that fire later. When a timer fires, the model gets a message that starts with `Timer fired:` plus the instructions it wrote. If it answers `[NO_REPLY]` (alone, or as the last line after a closing note), nothing is sent. This lets a timer do quiet work. (A group turn may answer `[NO_REPLY]` too; a DM never: a person who writes gets an answer.)
 
 Timers are Python tools (`setTimer`, `listTimers`, `editTimer`, `cancelTimer`), so API providers can set them. (`scripts/timer.py` below needs gpette's packages: run it with the same Python, or virtual environment, that runs `main.py`.) Claude Code cannot call Python tools; a Claude Code profile that may run Bash uses the command line instead:
 

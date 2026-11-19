@@ -298,7 +298,8 @@ class ClaudeCodeService(BaseLLMService):
         # A failure streak just ended: say so first. A quiet timer reply
         # ([NO_REPLY]) becomes just that line.
         if back:
-            quiet = response_text.strip().strip("`*\"' .").upper() in ("[NO_REPLY]", "NO_REPLY")
+            from modules.chat_controller import is_no_reply_text
+            quiet = is_no_reply_text(response_text)
             response_text = back if quiet else f"{back}\n\n{response_text}"
 
         return {

@@ -21,6 +21,17 @@ from modules import group_pace
 NO_REPLY_TOKEN = "[NO_REPLY]"
 
 
+def is_no_reply_text(text) -> bool:
+    """The no-reply token alone, or on its own last non-empty line."""
+    if not isinstance(text, str):
+        return False
+    tokens = (NO_REPLY_TOKEN, NO_REPLY_TOKEN.strip("[]"))
+    if text.strip().strip("`*\"' .").upper() in tokens:
+        return True
+    lines = [l for l in text.strip().splitlines() if l.strip()]
+    return bool(lines) and lines[-1].strip().strip("`*\"' .").upper() in tokens
+
+
 class ChatController:
     def __init__(self, service="lmstudio", thread_controller: ThreadController = None, function_registry: FunctionRegistry = None):
         self.thread_controller = thread_controller
@@ -465,11 +476,14 @@ class ChatController:
 
     @staticmethod
     def _is_no_reply(content) -> bool:
-        """True when a timer-fire response is only the no-reply token."""
+        """True when a response means "send nothing": the no-reply token alone,
+        or the token on its own last line. Models often write a closing note
+        and then the token on a line of its own ("Nothing to report this
+        turn." + a blank line + the token); that note is meant for nobody, so
+        the whole answer is dropped. A token in the middle of a sentence does
+        not count."""
         text = content.get("value") if isinstance(content, dict) else content
-        if not isinstance(text, str):
-            return False
-        return text.strip().strip("`*\"' .").upper() in (NO_REPLY_TOKEN, NO_REPLY_TOKEN.strip("[]"))
+        return is_no_reply_text(text)
 
     def _format_timer_context(self, timer: dict) -> str:
         """Format a timer's data into prompt text for the AI"""

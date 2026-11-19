@@ -272,7 +272,7 @@ tools = ["setTimer", "listTimers"]       # Python tools it may call</code></pre>
 
 <h2 id="timers">9. Timers and tools</h2>
 <p><b>Tools</b> (API providers): every <code>tools/name.py</code> holding a function <code>name</code> is a tool. The docstring is what the model sees; a <code>Parameters:</code> section describes the arguments; a <code>_conversation_id</code> argument is filled by gpette. Files starting with <code>_</code> or <code>sys_</code> are skipped. A profile's <code>tools</code> list limits them.</p>
-<p><b>Timers</b> ship as tools: <code>setTimer</code>, <code>listTimers</code>, <code>editTimer</code>, <code>cancelTimer</code>. The model sets one ("remind me at 8"); every <code>timer_check_secs</code> gpette queues the due ones as a message <code>Timer fired: &lt;instructions&gt;</code> in that chat. One-shot or recurring. If the model answers exactly <code>[NO_REPLY]</code>, nothing is sent: good for quiet background jobs.</p>
+<p><b>Timers</b> ship as tools: <code>setTimer</code>, <code>listTimers</code>, <code>editTimer</code>, <code>cancelTimer</code>. The model sets one ("remind me at 8"); every <code>timer_check_secs</code> gpette queues the due ones as a message <code>Timer fired: &lt;instructions&gt;</code> in that chat. One-shot or recurring. If the model answers <code>[NO_REPLY]</code> (alone, or as the last line after a closing note), nothing is sent: good for quiet background jobs.</p>
 
 <h2 id="recipes">10. Recipes</h2>
 <h3>A. Friends bot on Gemini, behind a password</h3>

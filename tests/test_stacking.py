@@ -132,6 +132,13 @@ check("a DM batch is the messages in order", msg["content"]["value"] == "a\nb", 
 # --- group pacing and [NO_REPLY]
 cc.thread_controller = tc
 check("[NO_REPLY] in a group sends nothing", cc._group_may_send("group_free", "[NO_REPLY]", "t") is False)
+check("a note then [NO_REPLY] on its own line sends nothing (2026-11-18 leak)",
+      cc._is_no_reply("Nothing to report this turn.\n\n[NO_REPLY]") is True)
+check("the trailing tag with markdown around it still counts",
+      cc._is_no_reply({"type": "text", "value": "done.\n**[NO_REPLY]**"}) is True)
+check("the tag mid-sentence does not silence a real answer",
+      cc._is_no_reply("I answer [NO_REPLY] when there is nothing to say.") is False)
+check("a normal answer is not a no-reply", cc._is_no_reply("hello") is False)
 check("a group answer goes out with no limit set", cc._group_may_send("group_free", "hello", "t") is True)
 check("and again (group_reply_secs = 0)", cc._group_may_send("group_free", "hello again", "t") is True)
 profiles.remember("group_chatty", "chatty", "group")
