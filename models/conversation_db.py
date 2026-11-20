@@ -42,6 +42,29 @@ _SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS registered_inboxes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        inbox_id TEXT NOT NULL,
+        own_inbox TEXT NOT NULL DEFAULT '',
+        profile TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        added_by TEXT NOT NULL DEFAULT '',
+        added_at INTEGER NOT NULL,
+        UNIQUE (inbox_id, own_inbox)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS admin_turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        main_profile TEXT NOT NULL,
+        from_profile TEXT NOT NULL,
+        asked_by TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        day_key TEXT NOT NULL,
+        asked_at INTEGER NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS conversation_participants (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         conversation_id TEXT NOT NULL,
@@ -284,6 +307,68 @@ class SQLiteConversationDB:
             self._execute("INSERT INTO auth_history (inbox_id, authenticated_at, day_key) VALUES (?, ?, ?)",
                           (inbox_id, current_time, today_key))
         return True
+
+    # ------------------------------------------------------------------ the inbox list
+    # Inboxes this bot wrote to first (modules/profiles.register_outreach). A row says
+    # which PUBLIC profile answers that inbox when it writes back. `own_inbox` is the
+    # [inboxes] name of our inbox that wrote ('' with one daemon): two of our bots
+    # writing to the same person are two rows.
+
+    def register_inbox(self, inbox_id, profile, reason, own_inbox='', added_by=''):
+        """Add an inbox to the list. True when it is new, False when it was there
+        (the first row is kept: who is on the list never changes by itself)."""
+        if self.registered_inbox(inbox_id, own_inbox):
+            return False
+        self._execute("""
+        INSERT INTO registered_inboxes (inbox_id, own_inbox, profile, reason, added_by, added_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (inbox_id, own_inbox or '', profile, reason, added_by or '', int(time.time())))
+        return True
+
+    def registered_inbox(self, inbox_id, own_inbox=''):
+        """The list's row for this inbox (a dict), or None."""
+        rows = self._query("SELECT * FROM registered_inboxes WHERE inbox_id = ? AND own_inbox = ?",
+                           (inbox_id, own_inbox or ''))
+        return rows[0] if rows else None
+
+    # ------------------------------------------------------------------ admin turns
+    # One row per [ADMIN_TURN] that woke a main (modules/admin_turn.py): the daily caps
+    # are counted here. `asked_by` is the person's inbox id (or the conversation id).
+
+    def add_admin_turn(self, main_profile, from_profile, asked_by, conversation_id):
+        self._execute("""
+        INSERT INTO admin_turns (main_profile, from_profile, asked_by, conversation_id, day_key, asked_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (main_profile, from_profile, asked_by or '', conversation_id or '',
+              self.get_today_key(), int(time.time())))
+        return True
+
+    def count_admin_turns(self, main_profile, day_key, asked_by=None):
+        """How many requests reached `main_profile` on that day, from one asker or in all."""
+        sql = "SELECT COUNT(*) AS n FROM admin_turns WHERE main_profile = ? AND day_key = ?"
+        params = [main_profile, day_key]
+        if asked_by is not None:
+            sql += " AND asked_by = ?"
+            params.append(asked_by)
+        rows = self._query(sql, tuple(params))
+        return int(rows[0]['n']) if rows else 0
+
+    def dm_conversations_of(self, inbox_ids):
+        """The DMs these inboxes wrote in, newest first: [(conversation id, sender inbox)].
+        How a main's own chat is found for an admin turn (modules/profiles.main_conversation)."""
+        ids = [str(i).strip().lower() for i in (inbox_ids or []) if str(i or '').strip()]
+        if not ids:
+            return []
+        marks = ','.join(['?'] * len(ids))
+        rows = self._query(f"""
+        SELECT m.conversation_id AS conversation_id, m.sender_inbox_id AS sender, MAX(m.timestamp) AS ts
+        FROM messages_v2 m
+        JOIN conversations c ON c.conversation_id = m.conversation_id
+        WHERE c.is_group = 0 AND m.role = 'user' AND lower(m.sender_inbox_id) IN ({marks})
+        GROUP BY m.conversation_id, m.sender_inbox_id
+        ORDER BY ts DESC
+        """, tuple(ids))
+        return [(r['conversation_id'], r['sender']) for r in rows]
 
     # ------------------------------------------------------------------ conversations
 

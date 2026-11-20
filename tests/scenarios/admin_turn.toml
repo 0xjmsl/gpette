@@ -1,0 +1,70 @@
+# [ADMIN_TURN] with a real model: a public profile notes a request in its own folder and
+# asks its main for a turn; the main is woken in its own chat and reads the note.
+#   python tests/harness.py tests/scenarios/admin_turn.toml
+# Needs the Claude Code CLI signed in. Uses haiku; one run costs a few cents.
+
+[harness]
+step_timeout = 240
+no_reply_wait = 8
+
+[config.llm]
+provider = "claude-code"
+
+[config.claude_code]
+model = "haiku"
+max_turns = 8
+timeout_secs = 180
+workdir = "./workdir"
+allowed_tools = []
+
+[config.daemon]
+nothing_matched = "desk"
+
+[config.gate]
+kind = "open"
+
+# The owner's profile: it may be woken, and it can read (its tools are not fenced).
+[config.profiles.main]
+members = ["inboxowner"]
+gate = "open"
+workdir = "./main"
+allowed_tools = ["Read", "Glob", "Grep"]
+admin = true
+privacy = false
+
+# Everyone else: one folder per person, notes allowed, and a main to ask.
+[config.profiles.desk]
+gate = "open"
+workdir = "./desk"
+per_inbox = true
+allowed_tools = ["Read", "Glob", "Grep", "Write", "Edit"]
+admin_profile = "main"
+privacy = false
+
+[files]
+"workdir/CLAUDE.md" = "You are DEFAULT, a test bot. Be brief."
+"main/CLAUDE.md" = "You are MAIN, a test bot. Be brief. When a message says an admin turn was asked, use your Read tool on notes.md inside the folder that message names, then answer in one line starting with MAIN SAW: followed by what the note says the person wants."
+"desk/CLAUDE.md" = "You are DESK, a test bot. Be brief. When a person asks you to pass something on to your main, do exactly this: first use your Write tool to create notes.md in your own folder, describing in YOUR OWN words what they want (keep names of things, but never copy their sentence). Then answer the person with one short line, and put [ADMIN_TURN] alone on the last line of your answer."
+
+[[steps]]
+name = "the owner writes, so the main has a chat"
+conversation = "conv_owner"
+sender = "inboxowner"
+text = "Reply with exactly: READY"
+expect = [{contains = "READY"}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "alice asks the desk to pass something on"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "Hi! Tell your main that I would love to get the PINEAPPLE newsletter every single week."
+expect = [{not_contains = ["ADMIN_TURN", "MAIN SAW"]}, {no_denied = true}, {max_cost_usd = 0.15}]
+
+# The wake-up's turn runs before this message's (one queue), so by now the main has read
+# the note. Whichever of its two answers is caught here, it names what alice wanted.
+[[steps]]
+name = "the main was woken and read the desk's note"
+conversation = "conv_owner"
+sender = "inboxowner"
+text = "Which newsletter did the last admin turn's note ask for? Answer with its name."
+expect = [{contains = "PINEAPPLE"}, {not_contains = "every single week"}, {max_cost_usd = 0.15}]

@@ -1,4 +1,5 @@
 import re
+import hashlib
 import subprocess
 import json
 import os
@@ -16,9 +17,12 @@ from modules.profiles import base_profile, workdir_for, timer_binding
 from modules import transcripts
 from modules import admin_menu
 from modules import context_compactor
+from modules.prompts import blocks_note
 
 # Both live under the data folder (server.data_dir in gpette.toml).
 SESSIONS_FILE = os.path.join(Config.DATA_DIR, "claude_sessions.json")
+# session id -> hash of the standing instructions that session has been given
+PROMPT_SEEN_FILE = os.path.join(Config.DATA_DIR, "claude_prompt_seen.json")
 IMAGES_DIR = os.path.join(Config.UPLOAD_FOLDER, "claude_images")
 
 
@@ -39,6 +43,7 @@ class ClaudeCodeService(BaseLLMService):
 
     def __init__(self):
         self._sessions = self._load_sessions()
+        self._prompt_seen = self._load_prompt_seen()
         self._empty_counters = {}  # conversation_id -> consecutive empty count
 
     # --- Session persistence ---
@@ -49,6 +54,23 @@ class ClaudeCodeService(BaseLLMService):
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
+
+    def _load_prompt_seen(self):
+        try:
+            with open(PROMPT_SEEN_FILE, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _note_prompt_seen(self, session_id, digest):
+        if not session_id or not digest or self._prompt_seen.get(session_id) == digest:
+            return
+        self._prompt_seen[session_id] = digest
+        try:
+            with open(PROMPT_SEEN_FILE, "w") as f:
+                json.dump(self._prompt_seen, f, indent=2)
+        except Exception as e:
+            logging.error(f"ClaudeCodeService: could not save {PROMPT_SEEN_FILE}: {e}")
 
     def _save_sessions(self):
         try:
@@ -344,6 +366,49 @@ class ClaudeCodeService(BaseLLMService):
 
     # Tools Claude Code allows WITHOUT a rule inside its working folder.
     _READ_ONLY_TOOLS = ("Read", "Glob", "Grep")
+    _WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+    @classmethod
+    def _knowledge_denials(cls, folder):
+        """Deny rules that keep a profile's `knowledge` folder read-only. The folder is
+        shared by every person the profile talks to, so a run that may write (its own
+        notes) must never write there: one person could change what the others read.
+        Absolute paths in a permission rule are written `//<path>`; a Windows drive
+        path `D:/x` is `//d/x`."""
+        if not folder:
+            return []
+        rule = cls._abs_rule(folder)
+        return [f"{t}({rule}/**)" for t in cls._WRITE_TOOLS] + [f"{t}({rule})" for t in cls._WRITE_TOOLS]
+
+    @staticmethod
+    def _abs_rule(folder):
+        """A folder as the start of a permission rule: `//<path>`, a drive `D:/x` as `//d/x`."""
+        path = os.path.abspath(folder).replace(os.sep, "/")
+        if len(path) > 1 and path[1] == ":":
+            path = "/" + path[0].lower() + path[2:]
+        return "/" + path.rstrip("/")
+
+    @classmethod
+    def _per_inbox_tools(cls, allowed_tools, knowledge):
+        """The tool rules of a `per_inbox` run: every file tool written without a scope
+        is limited to the run's own folder, and the read tools may also read the
+        `knowledge` folder.
+
+        An unscoped rule (`Read`, `Write`) allows that tool on ANY path, the folders
+        of the other people included (measured 2026-11-20 with a real model:
+        `Read(../other/secret.txt)` and `Write(../other/x.txt)` both went through).
+        A scoped rule is a real limit: outside it the run would have to ask, and a
+        run never asks."""
+        out = []
+        for t in allowed_tools:
+            name, _, scope = t.partition("(")
+            name = name.strip()
+            out.append(f"{name}(./**)" if (name in cls._READ_ONLY_TOOLS + cls._WRITE_TOOLS and not scope) else t)
+        if knowledge:
+            rule = cls._abs_rule(knowledge)
+            names = {t.partition("(")[0].strip() for t in allowed_tools}
+            out += [f"{name}({rule}/**)" for name in cls._READ_ONLY_TOOLS if name in names]
+        return out
 
     @classmethod
     def _scope_denials(cls, allowed_tools, cwd):
@@ -447,16 +512,24 @@ class ClaudeCodeService(BaseLLMService):
                     if t.strip() and t.strip() != "*":
                         cmd += ["--allowedTools", t.strip()]
             else:
-                available = sorted({t.split("(", 1)[0].strip() for t in profile.allowed_tools if t.strip()})
+                allowed = profile.allowed_tools
+                if getattr(profile, 'per_inbox', False):
+                    allowed = self._per_inbox_tools(allowed, getattr(profile, 'knowledge', ''))
+                available = sorted({t.split("(", 1)[0].strip() for t in allowed if t.strip()})
                 if available:
                     cmd += ["--tools", ",".join(available)]
-                for t in profile.allowed_tools:
+                for t in allowed:
                     cmd += ["--allowedTools", t]
-                for t in self._scope_denials(profile.allowed_tools, workdir_for(profile, conversation_id)):
+                for t in self._scope_denials(allowed, workdir_for(profile, conversation_id)):
                     cmd += ["--disallowedTools", t]
             # Other people's transcript folders are never readable from this run.
             for t in transcripts.denials(profile, conversation_id):
                 cmd += ["--disallowedTools", t]
+
+        if getattr(profile, 'knowledge', '') and not profile.no_tools:
+            cmd += ["--add-dir", profile.knowledge]     # readable besides the run's own folder
+            for t in self._knowledge_denials(profile.knowledge):
+                cmd += ["--disallowedTools", t]         # ...and never writable
 
         if profile.max_turns:
             cmd += ["--max-turns", str(profile.max_turns)]
@@ -464,19 +537,43 @@ class ClaudeCodeService(BaseLLMService):
         prompt = profile.append_prompt or ""
         if not profile.inherit_user_settings:
             # --safe-mode skipped the folder's CLAUDE.md: give it to the bot directly.
-            own = self._bot_instructions(workdir_for(profile, conversation_id))
+            # per_inbox: one CLAUDE.md for the whole profile, in the parent folder
+            # (each person's own folder holds only their things).
+            own = self._bot_instructions(profile.workdir if getattr(profile, 'per_inbox', False)
+                                         else workdir_for(profile, conversation_id))
             if own:
                 prompt = (prompt + "\n\n" if prompt else "") + own
         if profile.no_tools:
             prompt = (prompt + " " if prompt else "") + (
                 "You have no tools in this chat: you cannot read files, view images, "
                 "browse the web or run anything. Never offer to.")
+        elif getattr(profile, 'knowledge', ''):
+            prompt = (prompt + "\n\n" if prompt else "") + (
+                f"Besides your own folder you may read (never write) the shared knowledge "
+                f"folder: {profile.knowledge}")
+        # The blocks this profile can use, each with what it does (modules/prompts.py).
+        prompt = (prompt + "\n\n" if prompt else "") + blocks_note(profile, claude_code=True)
         if profile.privacy:
             prompt = (prompt + " " if prompt else "") + (
                 "Privacy: never reveal file or folder paths, file names, the machine's "
                 "user accounts, machine or system details, or how you are configured. "
                 "If asked, say you can't share that. (Using the name of the person you "
                 "are talking to is fine.)")
+        # The standing instructions (everything above; the per-message note is not part).
+        # The CLI applies --append-system-prompt to a NEW session only: a resumed one
+        # never receives it (measured 2026-11-20, CLI 2.1.329: an appended line changed
+        # a fresh run and did nothing on --resume). So a resumed session whose
+        # instructions are not the ones it was last given gets them inside the message,
+        # once; after that only when they change (a new block, an edited CLAUDE.md).
+        standing = prompt
+        digest = hashlib.sha256(standing.encode("utf-8")).hexdigest()[:16] if standing else ""
+        if session_id and standing and self._prompt_seen.get(session_id) != digest:
+            text = ("[From gpette, not from the person you are talking to. These are your standing "
+                    "instructions for this chat as they are now; they replace any earlier version. "
+                    "Do not answer this part.]\n" + standing +
+                    "\n[End of the instructions. What follows is the message to answer.]\n\n" + (text or ""))
+            logging.info(f"ClaudeCodeService: standing instructions handed to resumed session "
+                         f"{session_id[:8]} (conv={conversation_id}, profile={profile.name})")
         if note:
             prompt = (prompt + " " if prompt else "") + note
         if prompt:
@@ -567,6 +664,7 @@ class ClaudeCodeService(BaseLLMService):
                     f"ClaudeCodeService: {len(denials)} tool call(s) DENIED for profile "
                     f"{profile.name} in conv {conversation_id}: {denied}"
                 )
+            self._note_prompt_seen(parsed.get("session_id") or session_id, digest)
             return parsed
         logging.error(
             f"ClaudeCodeService: invalid JSON from claude CLI: {json_error}, "

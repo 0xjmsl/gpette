@@ -59,8 +59,10 @@ seen, busy = [], {"secs": 0}
 
 
 def handler(message):
-    batch = message.get("batch") or [message]
-    seen.append((message["conversationId"], [m["content"]["value"] for m in batch], time.monotonic()))
+    fire = message.get("role") == "Proactive"
+    batch = message.get("batch") or ([] if fire else [message])
+    seen.append((message["conversationId"],
+                 (["<timer>"] if fire else []) + [m["content"]["value"] for m in batch], time.monotonic()))
     time.sleep(busy["secs"])
 
 
@@ -118,8 +120,72 @@ tc.add_message(user("dm_slow", "take your time", sender="patient"))
 wait_for(1)
 check("a profile's stack_secs (1.2) overrides the server's (0.4)", seen and seen[0][2] - t0 >= 1.1, seen[0][2] - t0 if seen else None)
 
+# --- a timer fire, a person's messages and admin-turn wake-ups of one chat are one run
+def fire(conv, skip_session=False):
+    return {"role": "Proactive", "conversationId": conv, "senderInboxId": "ProactiveSystem",
+            "source": "ProactiveSystem",
+            "proactive_context": {"timer": {"timer_id": "t1", "skip_session": skip_session}}}
+
+
+def wake(conv, text="Admin turn asked by the public profile of inbox x."):
+    return {"role": "user", "source": "AdminTurn", "conversationId": conv, "kind": "dm",
+            "contentType": "text", "adminProfile": "me", "timestamp": int(time.time() * 1000),
+            "content": {"type": "text", "value": text}}
+
+
+def while_busy(*messages):
+    """Queue `messages` while the worker is held by another chat's run."""
+    seen.clear()
+    busy["secs"] = 1.0
+    tc.add_message(user("dm_block", "hold the worker", sender="zed"))
+    time.sleep(0.7)                      # its run started at ~0.4 s and lasts 1 s
+    for m in messages:
+        tc.add_message(m)
+    busy["secs"] = 0
+    time.sleep(0.9)
+    wait_for(2)
+    time.sleep(0.8)                      # let any further turn show up
+    return [s[1] for s in seen[1:]]
+
+
+got = while_busy(fire("dm_t"), user("dm_t", "hello"), wake("dm_t", "wake 1"))
+check("a timer fire takes the chat's waiting message and wake-up into its run (live 2026-11-20: they ran apart)",
+      got == [["<timer>", "hello", "wake 1"]], got)
+got = while_busy(wake("dm_u", "wake 1"), fire("dm_u"), user("dm_u", "and me"))
+check("a wake-up that comes first takes the waiting timer fire and what follows it",
+      got == [["<timer>", "wake 1", "and me"]], got)
+got = while_busy(fire("dm_v"))
+check("a timer fire with nothing waiting runs alone", got == [["<timer>"]], got)
+got = while_busy(fire("dm_w", skip_session=True), user("dm_w", "hello"))
+check("a skip_session timer never shares its run", got == [["<timer>"], ["hello"]], got)
+got = while_busy(fire("dm_x"), user("dm_x", "one"), fire("dm_x"), user("dm_x", "two"))
+check("one fire per run: a second fire is the next run, with what came after it",
+      got == [["<timer>", "one"], ["<timer>", "two"]], got)
+grp = user("grp_y", "hi all")
+grp["kind"] = "group"
+got = while_busy(fire("grp_y"), grp)
+check("a group stacks the same way: its timer fire takes the members' waiting messages",
+      got == [["<timer>", "hi all"]], got)
+got = while_busy(user("dm_z", "photo.jpg", ctype="attachment"), fire("dm_z"))
+check("a file is still its own turn, the fire after it", got == [["photo.jpg"], ["<timer>"]], got)
+
 # --- the batch reaches the model as one text; a group's lines carry names
 cc = ChatController.__new__(ChatController)
+text = cc._waiting_text([user("d", "are you there"), wake("d", "wake 1")], [user("d", "are you there")])
+check("the fire's text lists what was waiting, in order", "are you there\nwake 1" in text, text)
+check("and says a person must be answered", "[NO_REPLY] does not apply" in text, text)
+check("wake-ups alone leave [NO_REPLY] open", "does not apply" not in cc._waiting_text([wake("d")], []))
+cc._resolve_sender_name = lambda inbox: ({"alice": "Alice"}.get(inbox), "test")
+text = cc._waiting_text([user("g", "hi all", "alice"), wake("g", "wake 1")], [], True)
+check("in a group each waiting line carries its sender, and [NO_REPLY] stays open",
+      "Alice: hi all\nwake 1" in text and "does not apply" not in text, text)
+alone = []
+cc.thread_controller = tc
+cc.receive_Message_ChatController = lambda m: alone.append(m) or "handled"
+out = cc._answer_alone([user("dm_r", "a"), user("dm_r", "b")])
+check("messages stacked on a refused timer still get their turn, together",
+      out == "handled" and len(alone) == 1 and len(alone[0].get("batch") or []) == 2, alone)
+check("nothing stacked on a refused timer: nothing runs", cc._answer_alone([]) is None)
 cc._resolve_sender_name = lambda inbox: ({"alice": "Alice", "bob": "Bob"}.get(inbox), "test")
 msg = {"content": {"type": "text", "value": "x"}}
 cc._merge_batch(msg, [user("g", "hi all", "alice"), user("g", "hey", "bob")], True)

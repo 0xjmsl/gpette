@@ -7,7 +7,7 @@ import logging
 
 from models.conversation_db import ConversationDB
 from modules.thread_joins import get_group
-from modules import transcripts
+from modules import transcripts, send_block, admin_turn
 
 from utils.message_logger import log_message_flow, truncate_message
 
@@ -50,7 +50,8 @@ class ThreadController:
         # Skip rate limiting for Proactive messages from the ProactiveSystem
         is_proactive = message['role'] == 'Proactive' or message.get('source') == 'ProactiveSystem'
 
-        if message['role'] == 'user':
+        # An [ADMIN_TURN] wake-up is written by gpette, not by a person: it counts.
+        if message['role'] == 'user' and not admin_turn.is_wake(message):
             logging.info(f"Message from user in conversation {conversation_id}")
             if conversation_id in self.conversation_message_counters:
                 self.conversation_message_counters[conversation_id] = 0
@@ -64,6 +65,7 @@ class ThreadController:
             # Check if we should skip this message due to too many non-user messages
             if self.conversation_message_counters[conversation_id] >= self.max_continuous_non_user_messages:
                 logging.warning(f"Too many continuous non-user messages in conversation {conversation_id}")
+                admin_turn.done(message)
                 return
 
         # Guard: never queue empty assistant messages to XMTP. A tool call often
@@ -134,6 +136,19 @@ class ThreadController:
         conversation_id = message.get('conversationId')
         logging.info(f"Processing message: conversation={conversation_id}, role={message.get('role')}")
 
+        # A natural prompt starts a turn and sets its [SEND_XMTP_MESSAGE] budget: a timer
+        # fire, a person's message(s) or an [ADMIN_TURN] wake-up, each stacked one counted.
+        # A tool result (a send's result included) is not one and adds nothing.
+        stacked = len(message.get('batch') or [])
+        if message.get('role') == 'Proactive':
+            send_block.start_turn(conversation_id, stacked + 1)     # the fire + what rode along
+        elif (message.get('role') == 'user'
+                and message.get('source', 'SocketIO') in ('SocketIO', admin_turn.SOURCE)
+                and message.get('contentType') != 'readReceipt'):
+            send_block.start_turn(conversation_id, stacked or 1)
+        for m in (message.get('batch') or [message]):
+            admin_turn.done(m)              # its turn begins: the same person may ask again
+
         # Store the message in the database (skip Proactive triggers and read receipts - they're ephemeral;
         # a stacked batch was stored message by message already)
         if message.get('role') != 'Proactive' and message.get('contentType') != 'readReceipt'                 and not message.get('batch'):
@@ -164,8 +179,9 @@ class ThreadController:
         # Send the message to all registered handlers except the source
         for handler_name, handler in self.handlers.items():
             if handler_name != message_source:  # Skip if handler name matches message source
-                if message_source == 'FunctionRegistry' and handler_name == 'SocketIO':
-                    continue
+                if handler_name == 'SocketIO' and message_source in (
+                        'FunctionRegistry', send_block.SOURCE, admin_turn.SOURCE, admin_turn.RESULT_SOURCE):
+                    continue        # a tool result or a wake-up is for the model, never for the chat
 
                 if message.get('role') == 'Proactive' and handler_name == 'SocketIO':
                     continue
@@ -251,15 +267,35 @@ class ThreadController:
     # that arrive during the run wait in the queue for the next turn, as before.
     # A chat is one conversation id, and a group seen by one of several inboxes has its
     # own id per inbox (modules/inboxes.py), so a batch is always one chat for one bot.
+    #
+    # A timer fire of the same chat joins the stack too (since 2026-11-20): a person's
+    # messages, [ADMIN_TURN] wake-ups and a timer fire all call the same profile to
+    # action, so whatever is waiting when the chat's turn comes is ONE run. The fire
+    # carries the others (`batch`) and runs on the timer path. Same profile is given,
+    # in a DM and in a group alike: a chat has one profile (a group is matched by its
+    # own id, never by who writes), a timer runs only as its chat's profile, and a
+    # wake-up for another profile is dropped from the stack (chat_controller). Not a
+    # skip_session timer (it runs with no chat behind it). One fire per run.
+
+    @staticmethod
+    def _timer_fire(message):
+        """A timer fire that can share its turn with the chat's waiting messages."""
+        if message.get('role') != 'Proactive' or message.get('batch') or not message.get('conversationId'):
+            return False
+        timer = (message.get('proactive_context') or {}).get('timer') or {}
+        return bool(timer) and not timer.get('skip_session')
 
     @staticmethod
     def _stackable(message):
-        """A person's text message (not a file, a receipt, a tool result or a timer)."""
-        return (message.get('role') == 'user' and bool(message.get('senderInboxId'))
-                and bool(message.get('conversationId'))
+        """A person's text message (not a file, a receipt, a tool result or a timer),
+        or an [ADMIN_TURN] wake-up: both wait for the chat's turn and are answered together."""
+        if message.get('batch') or not message.get('conversationId') or message.get('role') != 'user':
+            return False
+        if admin_turn.is_wake(message):
+            return True
+        return (bool(message.get('senderInboxId'))
                 and message.get('contentType') in (None, '', 'text')
-                and message.get('source', 'SocketIO') == 'SocketIO'
-                and not message.get('batch'))
+                and message.get('source', 'SocketIO') == 'SocketIO')
 
     def _wait_quiet(self, conversation_id):
         from config import Config
@@ -275,11 +311,13 @@ class ThreadController:
             time.sleep(min(left, 0.25))
 
     def _take_stack(self, first):
-        """`first` plus every later stackable message of its chat, taken out of the
-        queue in order. Stops at the chat's first message that cannot be stacked (a
-        file), so the chat's order is kept."""
+        """(timer fire or None, messages): `first` plus every later message of its chat
+        that can share the turn, taken out of the queue in order. Stops at the chat's
+        first message that cannot (a file, a second timer fire), so the chat's order
+        is kept."""
         conv = first.get('conversationId')
-        batch = [first]
+        timer = first if self._timer_fire(first) else None
+        batch = [] if timer else [first]
         q = self.message_queue
         with q.mutex:
             keep = []
@@ -289,24 +327,46 @@ class ThreadController:
                     if self._stackable(m):
                         batch.append(m)
                         continue
+                    if timer is None and self._timer_fire(m):
+                        timer = m
+                        continue
                     blocked = True
                 keep.append(m)
-            if len(batch) > 1:
+            taken = len(batch) + (1 if timer is not None else 0) - 1
+            if taken:
                 q.queue.clear()
                 q.queue.extend(keep)
-                q.unfinished_tasks -= len(batch) - 1
-        return batch
+                q.unfinished_tasks -= taken
+        return timer, batch
 
     def _stack(self, message):
-        """The message to process: `message` itself, or one message carrying the batch."""
+        """The message to process: `message` itself, one message carrying the batch,
+        or a timer fire carrying the chat's waiting messages."""
         conv = message.get('conversationId')
-        self._wait_quiet(conv)
-        batch = self._take_stack(message)
+        if not self._timer_fire(message):
+            self._wait_quiet(conv)
+        timer, batch = self._take_stack(message)
+        if timer is not None:
+            if not batch:
+                return timer
+            carrier = dict(timer)
+            carrier['batch'] = batch
+            logging.info(f"Stacked {len(batch)} waiting message(s) onto a timer fire: conversation={conv}")
+            return carrier
+        return self.as_batch(batch)
+
+    def as_batch(self, batch):
+        """One message to process for `batch`: the message itself when it is alone
+        (not stored here), else one message carrying all of them (each stored)."""
         if len(batch) == 1:
-            return message
+            return batch[0]
+        conv = batch[0].get('conversationId')
         for m in batch:
             self.store_message(m)
-        merged = dict(batch[-1])
+        # The turn is the newest person's when a person is in it (their profile, their
+        # answer); a stack of wake-ups only stays a wake-up.
+        people = [m for m in batch if m.get('senderInboxId')]
+        merged = dict((people or batch)[-1])
         merged['batch'] = batch
         logging.info(f"Stacked {len(batch)} messages into one turn: conversation={conv}")
         return merged
@@ -318,7 +378,7 @@ class ThreadController:
             try:
                 message = self.message_queue.get()
                 logging.info(f"Got message from queue: conversation={message.get('conversationId')}, role={message.get('role')}")
-                if self._stackable(message):
+                if self._stackable(message) or self._timer_fire(message):
                     message = self._stack(message)
                 self.process_message(message)
             except Exception as e:

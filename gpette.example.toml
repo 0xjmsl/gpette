@@ -4,6 +4,9 @@
 
 [daemon]
 url = "http://127.0.0.1:3100"        # xmtp_daemon's local API
+# nothing_matched = ""               # who answers when no profile matched: "" = nobody | "<profile name>" = that profile, behind its gate.
+#                                    # Unset = the default profile below. [inboxes.<name>] may set its own
+# nothing_matched_groups = false      # true = that also covers groups no profile lists (else they follow [claude_code] groups)
 
 [server]
 host = "127.0.0.1"                   # keep it local: the web UI and /api/config have no login
@@ -39,7 +42,7 @@ privacy = true                       # bots never reveal paths, user names, mach
 inherit_user_settings = false        # keep false: true loads YOUR personal CLAUDE.md, memory and permissions into the bot
 fenced_timeout_secs = 180            # no-tools runs (groups, allowed_tools = []) give up sooner: they can stall
 transcripts = false                  # true = write conversations/<person>/ files the bot can search (each run sees only its own)
-groups = "sandbox"                   # group chats in no profile: sandbox (empty folder, no tools) | default (the folder and tools above)
+groups = "sandbox"                   # group chats in no profile: sandbox (empty folder, no tools) | default (the folder and tools above) | none (not answered). [inboxes.<name>] groups = ... sets it for one inbox
 group_workdir = "./groups"           # sandbox mode: one empty, tool-less folder per group chat
 
 [sessions]
@@ -60,6 +63,17 @@ default = "answer"                   # who this gpette answers when no rule matc
 # inboxes = ["<inbox id>"]          # a DM sender
 # accounts = ["0x<account>"]         # needs [sessions] owner_resolver
 # groups = ["<group conversation id>"]   # a group chat, by its id
+
+[send]                               # [SEND_XMTP_MESSAGE], for profiles with send = true
+per_item = 3                         # sends a turn gets for each timer fire or stacked message
+max_per_turn = 15                    # never more than this in one turn
+
+[admin_turn]                         # [ADMIN_TURN], for profiles with admin_profile (README: Asking the main)
+per_inbox_per_day = 15               # requests one person's chat may raise per day; 0 = no limit
+per_day = 50                         # requests one main takes per day; 0 = no limit
+copy_words = 6                       # a note sharing this many words in a row with a person's message is a copy; 0 = off
+# [admin_turn.inboxes]               # one inbox with its own per-day number
+# "<inbox id>" = 0
 
 [gate]
 kind = "open"                        # open (answer everyone) | password | none (answer no one) | a plug-in module
@@ -133,7 +147,20 @@ summary_words = 1000
 #                                     # ["*", "Bash", "Edit"]: every tool, and those two approved outright
 # sessions = "shared"
 # gate = "open"
-# admin = true                       # /menu (model, timers, session, status) + errors in full
+# menu = true                        # /menu (model, timers, session, status) + errors in full
+# admin = true                       # other profiles may wake this one with [ADMIN_TURN]; grants nothing else
+# admin_turns_per_day = 50           # this main's own daily total (default: [admin_turn] per_day)
+# admin_profile = "me"               # on another profile: the profile its [ADMIN_TURN] wakes
+# send = true                        # may write to other inboxes and registered groups with [SEND_XMTP_MESSAGE] (README: Writing first)
+# public_profile = "public"          # who answers the people this profile writes to first (README: public profiles)
+#
+# [profiles.public]                  # a public profile: no members, people arrive through the inbox list or nothing_matched
+# workdir = "./public"               # with per_inbox: the parent of one folder per person; its CLAUDE.md is shared
+# per_inbox = true
+# allowed_tools = ["Read", "Glob", "Grep"]
+# knowledge = "./knowledge"          # a folder every run of this profile may also read
+# admin_profile = "me"               # the profile its [ADMIN_TURN] wakes
+# admin_turns_per_inbox_per_day = 15 # its own per-person number (default: [admin_turn] per_inbox_per_day)
 #
 # [profiles.friends]
 # members = ["<inbox id>", "<group id>"]

@@ -1,12 +1,23 @@
 """Profiles: which environment answers which conversation.
 
 A profile is declared in gpette.toml as `[profiles.<name>]` with a `members`
-list (group conversation ids and/or sender inbox ids). A message is matched by
-its group conversation id first, then by its sender's inbox id. Unmatched:
+list (group conversation ids and/or sender inbox ids). A DM is matched by its
+sender's inbox id. A group is matched by its own conversation id ONLY, never by
+who wrote in it: a group gets a profile when someone lists its id. Unmatched:
 
 - a DM uses the `default` profile, built from the top-level settings;
-- a group uses the `group` sandbox: its own empty folder under
-  `[claude_code] group_workdir`, no tools, the group prompt.
+- a group follows `[claude_code] groups` (or `[inboxes.<name>] groups` for the
+  inbox that received it): `sandbox` = its own empty folder under
+  `[claude_code] group_workdir`, no tools, the group prompt; `default` = the
+  top-level folder and tools; `none` = not answered at all.
+
+`nothing_matched` says it outright for one inbox (`[inboxes.<name>]`, or `[daemon]`
+when there is one daemon): `""` = whoever matched no profile is not answered; a
+profile name = that profile answers them, behind its own gate. It covers DMs;
+`nothing_matched_groups = true` makes it cover groups no profile lists as well
+(off unless written: a group is added by hand). The older way to say "this
+profile answers everyone at its inbox", a profile bound to an inbox with no
+`members`, still works, under the same rule for groups.
 
 Every profile key is optional and falls back to the top-level value:
 
@@ -30,8 +41,27 @@ Every profile key is optional and falls back to the top-level value:
     privacy             true = never reveal paths, user names, machine or config details
     inherit_user_settings   true = load the host user's Claude Code settings, CLAUDE.md and
                         memory (owner-only; default from [claude_code], never for groups)
-    admin               true = /menu (model, timers, session, status) and full error text
-    on_error            describe | generic (default: describe for admin, else generic)
+    admin               true = other profiles may wake this one ([ADMIN_TURN]). It grants
+                        nothing else: tools and folder stay what the profile says
+    admin_profile       the profile this one's [ADMIN_TURN] wakes ('' = none). It must exist
+                        and have admin = true: checked at boot and again at each use
+    admin_turns_per_inbox_per_day   on the asking profile: requests one person may raise a day
+    admin_turns_per_day             on the woken profile: requests it takes a day (0 = no limit;
+                        defaults in [admin_turn], modules/admin_turn.py)
+    per_inbox           true = `workdir` is a parent: each person who writes gets their own
+                        subfolder `<workdir>/<their inbox id>/` and runs fenced inside it. The
+                        profile's instructions are then `<workdir>/CLAUDE.md`, one file for all
+    knowledge           a folder every run of this profile may also read (Claude Code --add-dir)
+    public_profile      the profile that answers the people THIS profile writes to first
+                        ([SEND_XMTP_MESSAGE]). It must be per_inbox and hold no power (no admin,
+                        send, menu, inherit_user_settings or "*" tools): the only kind of
+                        profile gpette ever puts someone in by itself
+    send                true = this profile may write to other inboxes and registered groups
+                        with [SEND_XMTP_MESSAGE] (modules/send_block.py). Off unless written;
+                        Claude Code profiles only
+    menu                true = /menu (model, timers, session, status) and full error text.
+                        (Until `menu` is written, `admin = true` still turns it on.)
+    on_error            describe | generic (default: describe with the menu, else generic)
     error_reply         generic: what people see when the model fails
 
 Defaults are read from Config at resolve time, so runtime edits apply.
@@ -70,7 +100,15 @@ class Profile:
     inherit_user_settings: bool = False   # load the host user's Claude Code settings/CLAUDE.md/memory
     session_owner: str = ''               # per_account: who this message's session belongs to
     transcripts: bool = False             # write conversations/<owner>/ files the bot can read (modules/transcripts.py)
-    admin: bool = False                   # /menu, and errors described in full (modules/admin_menu.py)
+    admin: bool = False                   # other profiles may wake this one with [ADMIN_TURN]; nothing more
+    admin_profile: str = ''               # the profile this one's [ADMIN_TURN] wakes ('' = none)
+    menu: bool = False                    # /menu, and errors described in full (modules/admin_menu.py)
+    send: bool = False                    # may use [SEND_XMTP_MESSAGE] (modules/send_block.py)
+    per_inbox: bool = False               # workdir is a parent: one subfolder per person (their inbox id)
+    folder_key: str = ''                  # per_inbox: whose subfolder this run uses
+    knowledge: str = ''                   # a folder every run may also read (--add-dir)
+    public_profile: str = ''              # who answers the people this profile writes to first
+    via_inbox_list: bool = False          # this message matched through the inbox list
     on_error: str = 'generic'             # describe | generic: how a failed model run is answered
     error_reply: str = ''                 # generic: the text sent ('' = the built-in one)
     inbox: str = ''                       # [inboxes.<name>] this profile speaks through ('' = any)
@@ -108,8 +146,38 @@ def _read_file(path):
         return None
 
 
-def _base(name, is_group):
-    """The top-level settings as a profile (the `default` one, or the `group` sandbox)."""
+GROUP_MODES = ('sandbox', 'default', 'none')
+
+
+def groups_mode(inbox=None):
+    """What a group in no profile gets: `[inboxes.<inbox>] groups` when the inbox
+    that received it sets one, else `[claude_code] groups`. Unknown = sandbox."""
+    entry = (Config.INBOXES or {}).get(inbox) if inbox else None
+    mode = (entry.get('groups') if isinstance(entry, dict) else None) \
+        or getattr(Config, 'CLAUDE_CODE_GROUPS', 'sandbox')
+    mode = str(mode or 'sandbox').strip()
+    return mode if mode in GROUP_MODES else 'sandbox'
+
+
+def nothing_matched(inbox=None):
+    """(set, profile name, groups) for the inbox that received a message: what
+    answers when no profile matched. `set` is False when the config does not say
+    (then the default profile / the groups mode apply); a name of '' = nobody."""
+    entry = (Config.INBOXES or {}).get(inbox) if inbox else None
+    if isinstance(entry, dict) and 'nothing_matched' in entry:
+        return True, str(entry.get('nothing_matched') or '').strip(), bool(entry.get('nothing_matched_groups'))
+    groups = bool(entry.get('nothing_matched_groups')) if isinstance(entry, dict) and 'nothing_matched_groups' in entry \
+        else bool(getattr(Config, 'NOTHING_MATCHED_GROUPS', False))
+    top = getattr(Config, 'NOTHING_MATCHED', None)
+    if top is not None:              # an inbox that sets none of its own follows [daemon]
+        return True, str(top or '').strip(), groups
+    return False, '', groups
+
+
+def _base(name, is_group, mode=None):
+    """The top-level settings as a profile (the `default` one, or the `group` sandbox).
+    `mode` is the groups mode to use for a group (None = `[claude_code] groups`)."""
+    mode = mode or groups_mode()
     p = Profile(
         name=name,
         model=Config.CLAUDE_CODE_MODEL or '',
@@ -124,7 +192,7 @@ def _base(name, is_group):
     # [claude_code] groups = "default": a group in no profile gets the top-level
     # environment (its folder and tools) instead of the empty sandbox; still one
     # session per group, never the host user's settings.
-    if is_group and str(getattr(Config, 'CLAUDE_CODE_GROUPS', 'sandbox')).strip() == 'default':
+    if is_group and mode == 'default':
         p.workdir = Config.CLAUDE_CODE_CWD
         p.allowed_tools = _tool_list(Config.CLAUDE_CODE_ALLOWED_TOOLS) or []
         if not p.allowed_tools or '*' in p.allowed_tools:
@@ -144,6 +212,8 @@ def _base(name, is_group):
         p.disallowed_tools = _tool_list(Config.CLAUDE_CODE_GROUP_DISALLOWED_TOOLS)
         p.append_prompt = Config.CLAUDE_CODE_GROUP_SYSTEM_PROMPT or ''
         p.sessions = 'per_conversation'     # each group keeps its own session
+        if mode == 'none':
+            p.gate = 'none'                 # groups = "none": a group nobody listed is not answered
     else:
         p.workdir = Config.CLAUDE_CODE_CWD
         p.allowed_tools = _tool_list(Config.CLAUDE_CODE_ALLOWED_TOOLS) or []
@@ -204,7 +274,15 @@ def _from_config(name, raw):
         p.sessions = 'per_conversation'
     if 'admin' in raw:
         p.admin = bool(raw['admin'])
-    p.on_error = str(raw.get('on_error') or ('describe' if p.admin else 'generic')).strip()
+    p.admin_profile = str(raw.get('admin_profile') or '').strip()
+    p.send = bool(raw.get('send'))
+    p.per_inbox = bool(raw.get('per_inbox'))
+    p.knowledge = str(raw.get('knowledge') or '').strip()
+    p.public_profile = str(raw.get('public_profile') or '').strip()
+    # `menu` is its own key. A config written before it existed has only
+    # `admin = true`, which used to mean the menu: it still does until `menu` is set.
+    p.menu = bool(raw['menu']) if 'menu' in raw else p.admin
+    p.on_error = str(raw.get('on_error') or ('describe' if p.menu else 'generic')).strip()
     if p.on_error not in ('describe', 'generic'):
         logging.warning(f"profile '{name}': on_error='{p.on_error}' unknown, using generic")
         p.on_error = 'generic'
@@ -236,26 +314,133 @@ def _match(member_id):
     return _match_in(member_id, list(Config.PROFILES or {}))
 
 
-def _pick(conversation_id, sender_inbox_id, is_group, inbox=None):
-    """The profile name for a chat, or None (= default / group sandbox).
+# --- the inbox list: people this bot wrote to first ------------------------------------
+# One table in the conversation store (registered_inboxes). It is read at every
+# message, never cached: a row added or removed under a running gpette counts at once.
 
-    No inbox known (one daemon, or no [inboxes]): every profile, group id first,
-    then sender. A known inbox (the configured name of the inbox that received
-    the message, or that owns the conversation): first the profiles bound to it
-    (group id, sender, then a bound profile with no members, which answers
-    everyone who writes to that inbox), then the profiles bound to no inbox."""
+_store = None
+
+
+def _db():
+    global _store
+    if _store is None:
+        from models.conversation_db import ConversationDB
+        _store = ConversationDB()
+    return _store
+
+
+# The tools a profile gpette hands out by itself may have: the ones whose reach gpette
+# can limit to one person's folder. A shell (Bash, PowerShell) reaches the whole machine.
+PUBLIC_TOOLS = ('Read', 'Glob', 'Grep', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit')
+
+
+def public_ok(name):
+    """None when `name` may be given to someone by gpette itself, else the reason.
+    Such a profile keeps people apart (per_inbox) and holds no power."""
+    raw = (Config.PROFILES or {}).get(name)
+    if not isinstance(raw, dict):
+        return f"profile '{name}' is not in the config"
+    if not raw.get('per_inbox'):
+        return f"profile '{name}' is not per_inbox"
+    if not str(raw.get('workdir') or '').strip():
+        return f"profile '{name}' is per_inbox and has no workdir"
+    for key in ('admin', 'send', 'menu', 'inherit_user_settings'):
+        if raw.get(key):
+            return f"profile '{name}' has {key} = true"
+    if 'allowed_tools' not in raw:
+        return f"profile '{name}' does not set allowed_tools (it would take the top-level ones)"
+    for t in (_tool_list(raw.get('allowed_tools')) or []):
+        tool = t.partition('(')[0].strip()
+        if tool == '*':
+            return f"profile '{name}' allows every tool (\"*\")"
+        if tool not in PUBLIC_TOOLS:
+            return (f"profile '{name}' allows {tool}: a public profile may only have the file tools "
+                    f"({', '.join(PUBLIC_TOOLS)}), which gpette can keep inside one person's folder")
+    return None
+
+
+def _registered(sender_inbox_id, inbox=None):
+    """The public profile the inbox list gives this sender, or None."""
+    key = _norm(sender_inbox_id)
+    if not key:
+        return None
+    try:
+        row = _db().registered_inbox(key, inbox or '')
+    except Exception as e:
+        logging.error(f"profiles: inbox list not readable ({e}); nobody matched through it")
+        return None
+    if not row:
+        return None
+    name = row.get('profile')
+    why = public_ok(name)
+    if why:
+        logging.error(f"profiles: inbox {key[:12]}... is on the list for '{name}', but {why}; not used")
+        return None
+    return name
+
+
+def register_outreach(profile, inbox_id):
+    """`profile` just wrote first to `inbox_id`. Put that inbox on the list for the
+    profile's `public_profile` and make its folder. Returns the sentence to add to
+    the send's result ('' when nothing new was made).
+
+    Nothing happens when the profile names no public profile, when that profile
+    could not pass `public_ok`, or when the inbox already belongs to a profile in
+    the config (the owner, a box): the list never moves anyone out of a profile."""
+    target = getattr(profile, 'public_profile', '') or ''
+    key = _norm(inbox_id)
+    if not target or not key:
+        return ''
+    why = public_ok(target)
+    if why:
+        logging.error(f"profiles: {getattr(profile, 'name', '?')} wrote to {key[:12]}..., "
+                      f"not put on the list: {why}")
+        return ''
+    own = getattr(profile, 'inbox', '') or ''
+    if _pick(None, key, False, own or None):
+        return ''
+    _db().register_inbox(key, target, 'outreach', own_inbox=own, added_by=getattr(profile, 'name', ''))
+    folder = os.path.join(Config.PROFILES[target]['workdir'], key)
+    if os.path.isdir(folder):
+        return ''
+    os.makedirs(folder, exist_ok=True)
+    logging.info(f"profiles: new public folder for {key[:12]}... in profile '{target}'")
+    return f"New public folder created for inbox {key}."
+
+
+def _pick_for(conversation_id, sender_inbox_id, is_group, inbox=None):
+    """`_pick` with the inbox list looked up (a DM only: a group is never on it)."""
+    registered = None if is_group else _registered(sender_inbox_id, inbox)
+    name = _pick(conversation_id, sender_inbox_id, is_group, inbox, registered)
+    return name, bool(registered and name == registered)
+
+
+def _pick(conversation_id, sender_inbox_id, is_group, inbox=None, registered=None):
+    """The profile name for a chat, or None (= default / the groups mode).
+
+    A DM is matched by its sender. A group is matched by its own id and never
+    by its sender: who writes in a group does not change which profile answers.
+
+    No inbox known (one daemon, or no [inboxes]): every profile. A known inbox
+    (the configured name of the inbox that received the message, or that owns
+    the conversation): first the profiles bound to it (the id, then a bound
+    profile with no members, which answers everyone who writes to that inbox),
+    then the profiles bound to no inbox.
+
+    `registered` is the public profile the inbox list gives this sender (a DM):
+    it comes after a `members` match, so the list never moves anyone out of a
+    profile, and before "everyone at this inbox"."""
     profiles = Config.PROFILES or {}
     conversation_id = inboxes.base_conversation(conversation_id)   # `<group>@<inbox>` -> the group id
+    key = conversation_id if is_group else sender_inbox_id
     if not inbox:
-        return (_match(conversation_id) if is_group else None) or _match(sender_inbox_id)
+        return _match(key) or registered
     bound = [n for n, r in profiles.items() if _inbox_of(r) == inbox]
     unbound = [n for n, r in profiles.items() if not _inbox_of(r)]
-    name = ((_match_in(conversation_id, bound) if is_group else None)
-            or _match_in(sender_inbox_id, bound)
-            or next((n for n in bound if not profiles[n].get('members')), None))
-    if name:
-        return name
-    return (_match_in(conversation_id, unbound) if is_group else None) or _match_in(sender_inbox_id, unbound)
+    everyone = next((n for n in bound if not profiles[n].get('members')), None)
+    if is_group and not nothing_matched(inbox)[2]:
+        everyone = None              # "everyone at this inbox" means DMs, unless groups are switched on
+    return _match_in(key, bound) or registered or everyone or _match_in(key, unbound)
 
 
 _owner_fn = None
@@ -307,11 +492,28 @@ def resolve_profile(conversation_id, sender_inbox_id, kind, inbox_id=None):
             inboxes.note(conversation_id, inbox)
         else:
             inbox = inboxes.of_conversation(conversation_id)
-    name = _pick(conversation_id, sender_inbox_id, is_group, inbox)
+    name, via_list = _pick_for(conversation_id, sender_inbox_id, is_group, inbox)
+    if not name:
+        said, fallback, with_groups = nothing_matched(inbox)
+        if said and (with_groups or not is_group):
+            if fallback in (Config.PROFILES or {}):
+                name = fallback
+            else:
+                if fallback:             # named a profile that is gone: silence, never a guess
+                    logging.error(f"profiles: nothing_matched = '{fallback}' is not a profile, not answering")
+                profile = _base(GROUP if is_group else DEFAULT, is_group, groups_mode(inbox))
+                profile.gate = 'none'
+                remember(conversation_id, profile.name, kind, '', sender_inbox_id)
+                return profile
     if name:
         profile = _from_config(name, Config.PROFILES[name])
     else:
-        profile = _base(GROUP if is_group else DEFAULT, is_group)
+        profile = _base(GROUP if is_group else DEFAULT, is_group, groups_mode(inbox))
+    if via_list:
+        profile.via_inbox_list = True
+        profile.gate = 'open'            # we wrote to them first: their answer needs no password
+    if profile.per_inbox and not is_group:
+        profile.folder_key = _norm(sender_inbox_id)
     if profile.sessions == 'per_account':
         if is_group:
             profile.sessions = 'per_conversation'    # a group has many senders: keep one session per group
@@ -362,7 +564,7 @@ def check_timer_binding(name, owner_inbox, conversation_id, is_group):
     reason it may not. The rule: `name` is the profile this chat resolves to today.
     A DM: the profile its inbox is a member of (else `default`), so the inbox a
     timer messages is always one linked to its profile. A group: the group's own
-    profile, else its setter's, else the `group` sandbox."""
+    profile, else the `group` sandbox (a group is never matched by a sender)."""
     name = (name or '').strip()
     if not name:
         return "it has no profile (bind it: scripts/timer.py bind)"
@@ -376,7 +578,7 @@ def check_timer_binding(name, owner_inbox, conversation_id, is_group):
             return f"this chat belongs to inbox '{inbox}', but profile '{name}' speaks through '{bound}'"
     if not is_group and not _norm(owner_inbox):
         return "it has no inbox (a timer in a DM reports to one inbox)"
-    expected = _pick(conversation_id, owner_inbox, is_group, inbox) or (GROUP if is_group else DEFAULT)
+    expected = _pick_for(conversation_id, owner_inbox, is_group, inbox)[0] or (GROUP if is_group else DEFAULT)
     if expected != name:
         who = 'this group' if is_group else f"inbox {_norm(owner_inbox)[:12]}..."
         return f"{who} belongs to profile '{expected}', not '{name}'"
@@ -397,6 +599,8 @@ def profile_for_timer(timer, is_group):
         profile = _base(name, is_group)
     if profile.inbox:
         inboxes.note(conversation_id, profile.inbox)    # its reply leaves through that inbox
+    if profile.per_inbox and not is_group:
+        profile.folder_key = _norm(owner_inbox)
     if profile.sessions == 'per_account':
         if is_group:
             profile.sessions = 'per_conversation'
@@ -406,6 +610,104 @@ def profile_for_timer(timer, is_group):
     remember(conversation_id, profile.name, 'group' if is_group else 'dm',
              profile.session_owner, owner_inbox)
     return profile, None
+
+
+# --- admin turns: who a profile's [ADMIN_TURN] wakes -----------------------------------
+
+def admin_target(profile_or_name):
+    """(target profile name, None) for the profile a `[ADMIN_TURN]` from this one
+    wakes, or (None, reason). Asked at every use, not only at boot: the config can
+    change under a running gpette, and a bad link must answer, not crash."""
+    name = getattr(profile_or_name, 'name', profile_or_name)
+    raw = (Config.PROFILES or {}).get(name)
+    if not isinstance(raw, dict):
+        return None, f"profile '{name}' is not in the config"
+    target = str(raw.get('admin_profile') or '').strip()
+    if not target:
+        return None, f"profile '{name}' has no admin_profile"
+    if target == name:
+        return None, f"profile '{name}' names itself as its admin_profile"
+    target_raw = (Config.PROFILES or {}).get(target)
+    if not isinstance(target_raw, dict):
+        return None, f"admin_profile '{target}' of profile '{name}' is not in the config"
+    if not bool(target_raw.get('admin')):
+        return None, f"admin_profile '{target}' of profile '{name}' does not have admin = true"
+    return target, None
+
+
+def last_sender(conversation_id):
+    """The inbox of the person this process last answered in a conversation ('' = unknown)."""
+    with _last_lock:
+        return _last_sender.get(conversation_id, '')
+
+
+def main_conversation(target, db=None):
+    """(conversation id, None) for the chat profile `target` is woken in by an
+    `[ADMIN_TURN]`: the newest DM that one of its `members` wrote in and that still
+    resolves to it today (at its own inbox, when it is bound to one). Or (None,
+    reason): a main nobody has written to yet has no chat to be woken in."""
+    raw = (Config.PROFILES or {}).get(target)
+    if not isinstance(raw, dict):
+        return None, f"profile '{target}' is not in the config"
+    members = [_norm(m) for m in (raw.get('members') or []) if _norm(m)]
+    if not members:
+        return None, f"profile '{target}' has no members, so it has no chat to be woken in"
+    bound = _inbox_of(raw)
+    try:
+        found = (db or _db()).dm_conversations_of(members)
+    except Exception as e:
+        return None, f"the chats of profile '{target}' could not be read ({e})"
+    for conversation_id, sender in found:
+        inbox = None
+        if inboxes.configured():
+            inbox = inboxes.of_conversation(conversation_id)
+            if bound and inbox != bound:
+                continue
+        if _pick_for(conversation_id, sender, False, inbox)[0] == target:
+            return conversation_id, None
+    return None, f"no member of profile '{target}' has written to it yet, so it has no chat to be woken in"
+
+
+def check_config():
+    """Refuse to start with an `admin_profile` that cannot be woken, or a `groups`
+    value that means nothing. Warn about `admin = true` written before `menu`
+    existed. Returns nothing; raises ValueError."""
+    for name, raw in (Config.PROFILES or {}).items():
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get('admin_profile') or '').strip():
+            _, reason = admin_target(name)
+            if reason:
+                raise ValueError(f"[profiles.{name}]: {reason}")
+        target = str(raw.get('public_profile') or '').strip()
+        if target:
+            why = public_ok(target)
+            if why:
+                raise ValueError(f"[profiles.{name}] public_profile = '{target}': {why}")
+        if raw.get('per_inbox') and not str(raw.get('workdir') or '').strip():
+            raise ValueError(f"[profiles.{name}] per_inbox = true needs a workdir (the parent of the per-person folders)")
+        if raw.get('send') and (raw.get('provider') or Config.LLM_SERVICE) != 'claude-code':
+            raise ValueError(f"[profiles.{name}] send = true needs provider claude-code "
+                             f"(the result of a send resumes a Claude Code session)")
+        if raw.get('admin') and 'menu' not in raw:
+            logging.warning(
+                f"[profiles.{name}] has admin = true and no `menu` key. `admin` now means "
+                f"'other profiles may wake this one'; the /menu has its own key. It stays on "
+                f"for this profile until you write menu = true (or false).")
+    where = [('[daemon]', getattr(Config, 'NOTHING_MATCHED', None))]
+    where += [(f'[inboxes.{n}]', e.get('nothing_matched')) for n, e in (Config.INBOXES or {}).items()
+              if isinstance(e, dict) and 'nothing_matched' in e]
+    for label, value in where:
+        value = str(value or '').strip()
+        if value and value not in (Config.PROFILES or {}):
+            raise ValueError(f"{label} nothing_matched = '{value}', but there is no [profiles.{value}]")
+    top = str(getattr(Config, 'CLAUDE_CODE_GROUPS', 'sandbox') or 'sandbox').strip()
+    if top not in GROUP_MODES:
+        raise ValueError(f"[claude_code] groups = '{top}' is not one of {', '.join(GROUP_MODES)}")
+    for iname, entry in (Config.INBOXES or {}).items():
+        mode = str(entry.get('groups') or '').strip() if isinstance(entry, dict) else ''
+        if mode and mode not in GROUP_MODES:
+            raise ValueError(f"[inboxes.{iname}] groups = '{mode}' is not one of {', '.join(GROUP_MODES)}")
 
 
 def profile_for_conversation(conversation_id, kind=None, conversation_db=None):
@@ -423,6 +725,9 @@ def profile_for_conversation(conversation_id, kind=None, conversation_db=None):
                 profile.sessions = 'per_conversation'
             else:
                 profile.session_owner = owner
+        if profile.per_inbox and kind != 'group':
+            with _last_lock:
+                profile.folder_key = _last_sender.get(conversation_id, '')
         return profile
     if kind is None and conversation_db is not None:
         try:
@@ -454,6 +759,11 @@ def setting(conversation_id, key, default):
 def workdir_for(profile, conversation_id):
     """The folder Claude Code runs in for this profile and conversation (created)."""
     path = profile.workdir
+    if getattr(profile, 'per_inbox', False) and path:
+        # One subfolder per person. No person known (it should not happen for a DM)
+        # is its own folder, never somebody's.
+        safe = "".join(c for c in str(profile.folder_key) if c.isalnum())[:64] or "_nobody"
+        path = os.path.join(path, safe)
     if profile.per_group_workdir:
         safe = "".join(c for c in str(conversation_id) if c.isalnum() or c in "-_")[:64] or "unknown"
         path = os.path.join(profile.workdir, f"group_{safe}")

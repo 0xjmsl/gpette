@@ -6,15 +6,15 @@ from modules.function_registry import FunctionRegistry
 from models.claudeCodeService import ClaudeCodeService
 from utils.message_logger import log_message_flow, truncate_message
 import os
-from modules.prompts import default_system_prompt
+from modules.prompts import default_system_prompt, blocks_note
 from modules.context_compactor import compact as compact_context
 from modules.thread_joins import get_group
 from config import Config
 from models.conversation_db import ConversationDB
 from modules import sender_names
 from memory.manager import MemoryManager
-from modules.profiles import resolve_profile, profile_for_conversation, profile_for_timer
-from modules import group_pace
+from modules.profiles import resolve_profile, profile_for_conversation, profile_for_timer, register_outreach
+from modules import group_pace, send_block, admin_turn
 
 # A timer fire or a group turn that answers exactly this sends nothing back.
 # A DM always gets its answer.
@@ -97,10 +97,13 @@ class ChatController:
         return self.thread_controller.get_chat_history(mode)
 
     def get_system_prompt(self, profile=None) -> str:
+        # API engines. (Claude Code ignores this prompt; it gets the same blocks
+        # section appended in claudeCodeService._run_claude.)
+        blocks = blocks_note(profile, claude_code=False) if profile is not None else ""
         if profile is not None and profile.system_prompt:
-            return f"{profile.system_prompt}\n"
+            return f"{profile.system_prompt}\n\n{blocks}\n"
         base_prompt = default_system_prompt()  # fresh each call: it carries the current time
-        return f"{base_prompt}\n"
+        return f"{base_prompt}\n{blocks}\n" if blocks else f"{base_prompt}\n"
 
     def _resolve_sender_name(self, inbox_id):
         """Resolve a sender's display name, using DB cache first, then live resolution."""
@@ -209,6 +212,12 @@ class ChatController:
                 profile = resolve_profile(conversation_id, message.get("senderInboxId"), message.get("kind"))
             else:
                 profile = profile_for_conversation(conversation_id, message.get("kind"), self._conversation_db)
+            # [ADMIN_TURN] wake-ups are only for the profile they were meant for, and
+            # only while it may still be woken (the config can change under a running gpette).
+            if not self._wake_ups_ok(message, profile):
+                log_message_flow("ChatController", "SYSTEM", "admin_turn_dropped", conversation_id,
+                                 f"a wake-up reached profile {profile.name}, which it was not meant for: dropped")
+                return None
             service = self._service_for(profile)
             conversation_history = self.thread_controller.get_chat_history(
                 conversation_id, limit=Config.COMPACTION_AFTER + 20)
@@ -257,6 +266,20 @@ class ChatController:
                 is_group=is_group,
                 profile=profile,
             )
+            # [SEND_XMTP_MESSAGE]: the message is sent and the turn comes back with
+            # the result; this answer is not delivered, the turn is not over.
+            if self._caught_send_block(service_response, profile, service, conversation_id, message.get("kind")):
+                return None
+            # [ADMIN_TURN]: the text before it is the answer; the main gets a wake-up.
+            if self._caught_admin_turn(service_response, profile, service, conversation_id, message.get("kind")):
+                return None
+            # The end of a turn that sent messages on the way, or that an [ADMIN_TURN]
+            # started with no person in it: [NO_REPLY] holds here too.
+            if message.get("source") in (send_block.SOURCE, admin_turn.SOURCE) \
+                    and self._is_no_reply(service_response.get("content")):
+                log_message_flow("ChatController", "SYSTEM", "send_turn_no_reply", conversation_id,
+                                 f"answered {NO_REPLY_TOKEN}, nothing sent")
+                return None
             # A group answer: [NO_REPLY] sends nothing, and a bot that posted there
             # less than group_reply_secs ago is held back (its tools already ran).
             if is_group and not service_response.get("tool_calls") and                     not self._group_may_send(conversation_id, service_response.get("content"), "group_turn"):
@@ -329,10 +352,17 @@ class ChatController:
             # the profile of that chat does not run. There is no fallback.
             is_group = self._conversation_db.is_group_conversation(conversation_id)
             profile, refused = profile_for_timer({**timer_data, "conversation_id": conversation_id}, is_group)
+            # What was waiting in this chat when the fire's turn came (thread_controller
+            # stacking): a person's messages and [ADMIN_TURN] wake-ups, answered in this run.
+            extras = message.get("batch") or []
             if profile is None:
                 log_message_flow("ChatController", "SYSTEM", "timer_refused", conversation_id,
                                  f"timer={timer_data.get('timer_id')} did not fire: {refused}")
-                return None
+                return self._answer_alone(extras)   # the fire is refused, the messages are not
+            extras = [m for m in extras if not admin_turn.is_wake(m)
+                      or (m.get("adminProfile") == profile.name and profile.admin)]
+            # A person in a one-to-one chat must be answered; in a group [NO_REPLY] stays open.
+            people = [] if is_group else [m for m in extras if not admin_turn.is_wake(m)]
 
             skip_session = bool(timer_data.get('skip_session', False))
             tool_name = "timer_fired"
@@ -370,6 +400,8 @@ class ChatController:
             # Store both directly (bypass ThreadController to avoid SocketIO dispatch / FunctionRegistry execution)
             self._conversation_db.store_message(fake_assistant)
             self._conversation_db.store_message(tool_return)
+            for m in extras:
+                self.thread_controller.store_message(m)
 
             service = self._service_for(profile)
 
@@ -382,13 +414,20 @@ class ChatController:
             else:
                 conversation_history = self.thread_controller.get_chat_history(
                     conversation_id, limit=Config.COMPACTION_AFTER + 20)
-                conversation_history = conversation_history[:-1] if conversation_history else []
+                drop = 1 + len(extras)          # this turn's input is passed separately
+                conversation_history = conversation_history[:-drop] if conversation_history else []
                 conversation_history, context_note = compact_context(
                     conversation_history, service, conversation_id, self._conversation_db,
                     profile=profile, incoming=tool_return)
                 if context_note:
                     system_prompt = system_prompt + context_note
                     tool_return['contextNote'] = context_note   # for Claude Code (no system prompt)
+
+            # The stored fire stays the timer's own text; the model gets it with the
+            # waiting messages under it.
+            if extras:
+                tool_return = {**tool_return,
+                               "content": context_text + self._waiting_text(extras, people, is_group)}
 
             # Get function declarations so the LLM can use tools in its response
             tools = self._tools_for(profile)
@@ -404,10 +443,17 @@ class ChatController:
                 profile=profile,
             )
 
+            if self._caught_send_block(service_response, profile, service, conversation_id,
+                                       "group" if is_group else "dm"):
+                return None
+            if self._caught_admin_turn(service_response, profile, service, conversation_id,
+                                       "group" if is_group else "dm"):
+                return None
             # A timer fire may decide there is nothing worth saying (quiet hours,
             # silent upkeep). Replying with exactly NO_REPLY_TOKEN ends the run
-            # without sending anything. User messages never take this path.
-            if self._is_no_reply(service_response.get("content")):
+            # without sending anything. Not when a person's message rode along: a
+            # person always gets an answer.
+            if not people and self._is_no_reply(service_response.get("content")):
                 log_message_flow("ChatController", "SYSTEM", "timer_no_reply", conversation_id,
                                  f"timer={timer_data.get('timer_id')} answered {NO_REPLY_TOKEN}, nothing sent")
                 return None
@@ -441,6 +487,109 @@ class ChatController:
             log_message_flow("ChatController", "SYSTEM", "proactive_error", None, str(e))
             return None
 
+    def _caught_send_block(self, service_response, profile, service, conversation_id, kind):
+        """True when the answer held a [SEND_XMTP_MESSAGE] block that was acted on:
+        the result is queued for the model and nothing goes to the chat.
+
+        Only a Claude Code run can take the result (it resumes its session with
+        it). On another engine the block is cut out and the rest of the answer is
+        delivered as usual: a block must never reach the chat as text."""
+        content = service_response.get("content")
+        text = content.get("value") if isinstance(content, dict) else content
+        if not send_block.has_block(text):
+            return False
+        if not isinstance(service, ClaudeCodeService):
+            rest = send_block.strip(text)
+            log_message_flow("ChatController", "SYSTEM", "send_block_dropped", conversation_id,
+                             "this engine cannot take a send result: block cut out")
+            if not rest:
+                return True
+            if isinstance(content, dict):
+                content["value"] = rest
+            else:
+                service_response["content"] = rest
+            return False
+        result = send_block.run(text, profile, conversation_id, on_sent=self._store_sent)
+        log_message_flow("ChatController", "SYSTEM", "send_block", conversation_id, result.replace("\n", " | ")[:300])
+        self.thread_controller.add_message(send_block.result_message(conversation_id, result, kind))
+        return True
+
+    def _caught_admin_turn(self, service_response, profile, service, conversation_id, kind):
+        """True when nothing of this answer goes to the chat. An answer that ends with
+        [ADMIN_TURN] (modules/admin_turn.py):
+
+        - accepted: a wake-up is queued for the main; the text before the block stays
+          as the answer (returns False so it is delivered), or nothing when there is none.
+        - refused (the link, a copied note, the caps): nothing is delivered and the
+          reason is queued for the model, which carries on. Only a Claude Code run can
+          take it; on another engine the block is cut out and the text is delivered."""
+        content = service_response.get("content")
+        text = content.get("value") if isinstance(content, dict) else content
+        if not admin_turn.has_block(text):
+            return False
+        rest = admin_turn.before(text)
+        try:
+            outcome = admin_turn.ask(profile, conversation_id, self._conversation_db)
+        except Exception as e:                      # a failed request never ends the turn badly
+            log_message_flow("ChatController", "SYSTEM", "admin_turn_error", conversation_id, str(e))
+            outcome = {"wake": None, "error": None}
+        refused = outcome.get("error")
+        if refused and isinstance(service, ClaudeCodeService):
+            log_message_flow("ChatController", "SYSTEM", "admin_turn_refused", conversation_id,
+                             refused.replace("\n", " | ")[:200])
+            self.thread_controller.add_message(admin_turn.result_message(conversation_id, refused, kind))
+            return True
+        if refused:
+            log_message_flow("ChatController", "SYSTEM", "admin_turn_refused", conversation_id,
+                             "this engine cannot take the reason: block cut out")
+        elif outcome.get("wake"):
+            log_message_flow("ChatController", "SYSTEM", "admin_turn", conversation_id,
+                             f"profile {profile.name} woke {outcome['wake'].get('adminProfile')}")
+            self.thread_controller.add_message(outcome["wake"])
+        if not rest:
+            return True
+        if isinstance(content, dict):
+            content["value"] = rest
+        else:
+            service_response["content"] = rest
+        return False
+
+    @staticmethod
+    def _wake_ups_ok(message, profile):
+        """False when this turn is nothing but [ADMIN_TURN] wake-ups that are not for
+        `profile`. Wake-ups for another profile inside a stack are taken out of it."""
+        def ok(m):
+            return not admin_turn.is_wake(m) or (m.get("adminProfile") == profile.name and profile.admin)
+        batch = message.get("batch")
+        if not batch:
+            return ok(message)
+        kept = [m for m in batch if ok(m)]
+        if not kept:
+            return False
+        if len(kept) != len(batch):
+            message["batch"] = kept
+        return True
+
+    def _store_sent(self, conversation_id, block, profile=None):
+        """Keep a sent message in its own chat's history, so whoever answers there
+        later sees what was said. A first message to someone puts them on the inbox
+        list for the sender's public profile and makes their folder. Returns text to
+        add to the result line ('' = none)."""
+        made = ""
+        if block.get("kind") == "inbox":
+            self._conversation_db.commit_conversation(conversation_id, "dm")
+            if profile is not None:
+                made = register_outreach(profile, block.get("target"))
+        self.thread_controller.store_message({
+            "role": "assistant",
+            "address": self.thread_controller.get_address(),
+            "conversationId": conversation_id,
+            "content": {"type": "text", "value": block.get("message", "")},
+            "timestamp": int(datetime.datetime.now().timestamp() * 1000),
+            "source": send_block.SOURCE,
+        })
+        return made
+
     def _group_may_send(self, conversation_id, content, what):
         """True (and the post is counted) when a group answer goes out."""
         if self._is_no_reply(content):
@@ -453,6 +602,35 @@ class ChatController:
             return False
         group_pace.mark(conversation_id)
         return True
+
+    def _answer_alone(self, extras):
+        """Messages that were stacked onto a timer fire that did not run: they get
+        their own turn, as if the fire had not been there."""
+        if not extras:
+            return None
+        message = self.thread_controller.as_batch(extras)
+        if len(extras) == 1:
+            self.thread_controller.store_message(message)
+        return self.receive_Message_ChatController(message)
+
+    def _waiting_text(self, extras, people, is_group=False):
+        """What is added under a timer fire's text when messages of the same chat
+        were waiting: each one, in order (in a group, with its sender's name), and
+        what that means for the answer."""
+        lines = []
+        for m in extras:
+            c = m.get("content")
+            text = c.get("value", "") if isinstance(c, dict) else str(c or "")
+            if is_group and not admin_turn.is_wake(m):
+                name, _ = self._resolve_sender_name(m.get("senderInboxId"))
+                text = f"{name or 'someone'}: {text}"
+            lines.append(text)
+        text = ("\n\nAlso waiting in this chat when the timer fired. Handle these in this same "
+                "turn, after or along with the timer's work:\n" + "\n".join(lines))
+        if people:
+            text += ("\n\nA person wrote, so this turn ends with an answer to them: "
+                     f"{NO_REPLY_TOKEN} does not apply here.")
+        return text
 
     def _merge_batch(self, message, batch, is_group):
         """Several messages of one chat answered in one turn: one text, in order.

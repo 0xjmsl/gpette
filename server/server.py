@@ -47,6 +47,9 @@ def create_server(config_class):
     # [inboxes]: every profile's inbox exists and every inbox has a url.
     from modules import inboxes
     inboxes.check_config()
+    # Profiles: every admin_profile can be woken, every `groups` value is known.
+    from modules import profiles as _profiles
+    _profiles.check_config()
     for _name in Config.INBOXES:
         _id = inboxes.inbox_id_of(_name)
         logging.info(f"inbox '{_name}': {inboxes.url_of(_name)} = {(_id[:12] + '...') if _id else 'NOT ANSWERING (read again when needed)'}")

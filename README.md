@@ -70,7 +70,7 @@ A user can start over by sending `/reset`, `reset conversation`, `fresh start` o
 
 A profile gives some people or groups their own environment: provider, model, folder, tools, prompt, session routing and gate. Declare it as `[profiles.<name>]` with a `members` list of inbox ids and group conversation ids.
 
-A message is matched by its group id first, then by the sender's inbox id. Anything unmatched uses the top-level settings. Every key is optional. See the end of `gpette.example.toml` for the full list.
+A DM is matched by its sender's inbox id. A group is matched by its own id only, never by who writes in it: a group gets a profile when you list its id in `members`, so the owner speaking in some other group does not bring the owner's folder and tools there. Anything unmatched uses the top-level settings. Every key is optional. See the end of `gpette.example.toml` for the full list.
 
 With [several inboxes](#several-inboxes), `inbox = "<name>"` binds a profile to one of them: it answers only what arrives at that inbox, and speaks through it.
 
@@ -99,7 +99,7 @@ That is all. You never write an inbox id: gpette asks each daemon for its own (`
 
 How a message finds its way:
 
-- **It arrives.** The daemon says which inbox received it. Only the profiles bound to that inbox are tried, by group id and then by sender; a bound profile with no `members` answers everyone who writes to that inbox. Profiles with no `inbox` are tried after them, then the default. So you can write to alice and to bob from the same account and get two different bots, in two different chats.
+- **It arrives.** The daemon says which inbox received it. Only the profiles bound to that inbox are tried, a group by its id and a DM by its sender; a bound profile with no `members` answers everyone who writes to that inbox. Profiles with no `inbox` are tried after them, then the default. So you can write to alice and to bob from the same account and get two different bots, in two different chats.
 - **It leaves.** A reply goes out through the inbox its chat belongs to. gpette learns that from the first message it gets in the chat, or from the timer that fires there, and keeps it in `<data_dir>/conversation_inboxes.json`. A chat it knows nothing about goes out through `[daemon] url`.
 - **Several of your inboxes in one group** is fine: inside gpette each inbox has its own copy of the group, with the id `<group id>@<inbox name>` (its own history, session, profile and timers; list the plain group id in `members`), and each answer leaves through its own inbox. Pace them with `group_reply_secs` ([Group chats](#group-chats)).
 - **A bot that reports to you on a timer:** a timer can only be set in a chat gpette has received a message in. Write one word to the bot first, find the chat with `timer.py conversations`, then set the timer there with the bound profile (`timer.py set … --conv <id> --profile alice --owner <your inbox id>`). Each fire goes out as alice. (The daemon's `POST /dm` opens a chat from the bot's side, but gpette does not know that chat until a message arrives in it.)
@@ -108,7 +108,9 @@ gpette refuses to start if a profile names an inbox that is not under `[inboxes]
 
 ## The menu and errors
 
-A profile with `admin = true` gets `/menu`: a message of buttons (Status, Model, Session, Timers, Errors, Help). Apps that know the `coinbase.com/actions` content type show buttons; any other app shows a numbered list, and typing the number works the same. It runs before the model, so it answers while the model is over its limit. Session has "Compact now" and "New session", the same as typing `/compact` and `/reset`. Shortcuts: `/status`, `/model <name>` (`/model default` goes back to the config), `/compact`, `/reset`. A model picked here, and paused timers, are kept in `<data_dir>/menu_state.json` and survive a restart. On other profiles `/menu` is ordinary text. If the menu itself fails, that press is dropped and you get a message with the error; the conversation keeps working.
+A profile with `menu = true` gets `/menu`: a message of buttons (Status, Model, Session, Timers, Errors, Help). Apps that know the `coinbase.com/actions` content type show buttons; any other app shows a numbered list, and typing the number works the same. It runs before the model, so it answers while the model is over its limit. Session has "Compact now" and "New session", the same as typing `/compact` and `/reset`. Shortcuts: `/status`, `/model <name>` (`/model default` goes back to the config), `/compact`, `/reset`. A model picked here, and paused timers, are kept in `<data_dir>/menu_state.json` and survive a restart. On other profiles `/menu` is ordinary text. If the menu itself fails, that press is dropped and you get a message with the error; the conversation keeps working.
+
+`admin = true` means one thing: other profiles may wake this one (the `[ADMIN_TURN]` hand-off, in progress). It gives no tools and no folder; those stay whatever the profile says. A profile names the one it hands to with `admin_profile = "<name>"`. gpette refuses to start if that profile does not exist or does not have `admin = true`, and checks again at every use, so a config changed under a running gpette answers with an error instead of breaking. A config written before `menu` existed, with only `admin = true`, keeps its menu and logs a warning at start until `menu` is written.
 
 When a Claude Code run fails, the reason is sorted (limit, overloaded, auth, timeout, session, other) and answered per profile with `on_error`: `describe` sends the reason and the model (the default for admin profiles), `generic` sends `error_reply` ("I'm not available right now…" unless you set your own; `[claude_code] error_reply` sets it for every profile). A timer fire reports a failure once, stays quiet while it repeats, and says "back" when a run works again. Only a missing session is dropped and retried fresh; a limit or a login error keeps the session.
 
@@ -116,7 +118,7 @@ A message gpette crashes on is dropped, not retried: the webhook answers the dae
 
 ## Group chats
 
-A group that is in no profile runs in its own empty folder under `[claude_code] group_workdir`, with no tools at all. Set `[claude_code] groups = "default"` to give every such group the top-level folder and tools instead (still one session per group). In groups, each message is prefixed with the sender's name so the model knows who spoke. List a group in a profile to give it more.
+A group that is in no profile runs in its own empty folder under `[claude_code] group_workdir`, with no tools at all. Set `[claude_code] groups = "default"` to give every such group the top-level folder and tools instead (still one session per group), or `groups = "none"` to not answer such groups at all. With `[inboxes]`, `[inboxes.<name>] groups = ...` sets it for the groups that write to that inbox, so one bot can ignore new groups while another talks in them. **Who answers when no profile matched** can be said outright with `nothing_matched`, in `[daemon]` or per inbox in `[inboxes.<name>]`: `nothing_matched = ""` answers nobody (silence, no receipt, nothing stored), and `nothing_matched = "<profile>"` hands them to that profile, behind that profile's own gate (a password gate there makes a guest profile). It covers DMs. Add `nothing_matched_groups = true` to cover groups no profile lists too; without it such a group follows `groups`. A profile bound to an inbox with no `members` still means "everyone who DMs this inbox", and reaches groups only with `nothing_matched_groups = true` on that inbox. In groups, each message is prefixed with the sender's name so the model knows who spoke. List a group in a profile to give it more.
 
 Sender names are looked up on [PublicOS](https://publicos.dev) by default: an XMTP inbox that belongs to a PublicOS account shows as that account's display name, read with two calls to the public RPC (no key, no account). Senders without one show as a short inbox id. Point `[senders] resolver` at your own module (`resolve(inbox_id, address=None)` returning a name or `None`) to use another directory, or set it to `""` to turn lookup off; `[senders] rpc` and `mr_anchor` change where the built-in lookup reads.
 
@@ -124,7 +126,9 @@ Sender names are looked up on [PublicOS](https://publicos.dev) by default: an XM
 
 ## Stacking: several messages, one turn
 
-People often send many short messages instead of one long one. gpette answers them together: when a chat's turn comes, it waits until the chat has been quiet for **`stack_secs`** (`[server]`, default 5; a profile may set its own, 0 = no wait), each new message restarting the wait, and then hands every waiting message of that chat to the bot as one turn (in a group, each line starts with its sender's name). A message that arrives while the bot is running waits for the next turn. Files and timer fires are never stacked; a file keeps its place in the chat's order. `tests/test_stacking.py` checks it without a model.
+People often send many short messages instead of one long one. gpette answers them together: when a chat's turn comes, it waits until the chat has been quiet for **`stack_secs`** (`[server]`, default 5; a profile may set its own, 0 = no wait), each new message restarting the wait, and then hands every waiting message of that chat to the bot as one turn (in a group, each line starts with its sender's name). A message that arrives while the bot is running waits for the next turn. A file is never stacked and keeps its place in the chat's order. `tests/test_stacking.py` checks it without a model.
+
+**A timer fire joins the stack.** A person's messages, `[ADMIN_TURN]` wake-ups and a timer fire of the same chat all call the same profile to action, so whatever is waiting when that chat's turn comes is one run, whichever of them is first in the queue. The run is the timer's: the bot gets the timer's text with the waiting messages listed under it. In a one-to-one chat, when a person's message is among them the run must end with an answer, so `[NO_REPLY]` does not silence it; in a group `[NO_REPLY]` stays open and each waiting line carries its sender's name. One fire per run; a second fire of the same chat is the next run. A group stacks the same way as a DM, because a chat has one profile: a group is matched by its own id and never by who writes, a timer runs only as its chat's profile, and a wake-up meant for another profile is dropped from the stack. One case stays apart: a `skip_session` timer, which runs with no chat behind it. If the fire is refused (its profile is gone or no longer that chat's), the messages still get their turn.
 
 ## Gates
 
@@ -146,6 +150,101 @@ A gate decides who gets answered. Set `[gate] kind`:
 `[filter]` runs before the gate: an ordered list of `answer` / `ignore` rules, first match wins, `default` when none matches. A rule lists `inboxes` and `accounts` (the sender of a DM; accounts need the `owner_resolver`) and `groups` (a group chat, by its id). An ignored message gets no reply and no read receipt.
 
 Its main use: **one inbox, two machines.** XMTP lets one inbox run several installations, and each receives every message. Give each gpette rules for the people it serves (for example the owner's machine answers the owner's inboxes, the public one ignores them), so exactly one replies. `tests/scenarios/filter_rules.toml` and `split_*.toml` show it.
+
+## Writing first: `[SEND_XMTP_MESSAGE]`
+
+A bot normally only answers. A profile with `send = true` can also write to another inbox, or to a group, in the middle of its turn. The model puts this in its answer:
+
+```
+[SEND_XMTP_MESSAGE]
+{INBOXID: <the inbox id>,
+MESSAGE: the text to send}
+```
+
+`GROUPID:` instead of `INBOXID:` writes to a group. gpette sends the message and gives the turn back with a result, the way a tool does, so the run carries on: `Message sent to inbox <id>. 2 sends left in this turn.`, or `Message NOT sent to inbox <id>: <why>`. One block per answer: any other text in that answer is dropped, not delivered (the turn is not over), and two blocks in one answer send nothing and return an error. The turn ends with the first answer that has no block (or with `[NO_REPLY]`).
+
+- **The model is told** what the block does and what it sets up: see *What a profile is told* below.
+- **Off unless you write `send = true`** on a profile. gpette never turns it on. Claude Code profiles only: the result resumes the run's session, and gpette refuses to start with `send = true` on another engine. A profile without it that writes the block is told it may not send; on an API engine the block is cut out of the answer.
+- **A budget per turn.** A turn starts from a timer fire, from a person's messages or from an `[ADMIN_TURN]` wake-up. It gets `[send] per_item` sends (default 3) for each of them, counting every stacked message, and never more than `[send] max_per_turn` (default 15). A result is not a new start and adds nothing. Only a message that was sent uses one up.
+- **A group must be registered**: its id is in some profile's `members`. An inbox needs nothing: the daemon opens the DM (`POST /dm`).
+- The sent message is kept in that chat's history. Each round trip counts toward the thread controller's limit of 50 messages in a row without a person. With `[inboxes]` the message leaves through the profile's inbox.
+
+`tests/test_send_block.py` checks the block, the budget and the round trip with a fake daemon and a scripted model.
+
+### The people a bot writes to: public profiles
+
+When a bot writes to someone first, their answer should not land in the bot's own folder with its tools. Give the bot a second, public profile and name it:
+
+```toml
+[profiles.bot_main]
+members = ["<your inbox id>"]
+send = true
+public_profile = "bot_public"
+
+[profiles.bot_public]
+workdir = "./public"                # a parent folder
+per_inbox = true                    # each person gets ./public/<their inbox id>/
+allowed_tools = ["Read", "Glob", "Grep"]
+knowledge = "./knowledge"           # a folder every run may also read
+gate = "password"                   # strangers who know the password get the same profile
+
+[daemon]
+nothing_matched = "bot_public"
+```
+
+- **Writing first registers them.** The first `[SEND_XMTP_MESSAGE]` to an inbox puts it on the bot's inbox list (a table in the conversation store) for the `public_profile`, makes its folder, and tells the model: `New public folder created for inbox <id>.` When that person answers, the public profile takes it, with no password. Someone already in a profile of the config is never put on the list.
+- **One folder per person.** With `per_inbox = true` each person's run happens inside `<workdir>/<their inbox id>/`. gpette limits every file tool to that folder (`Read` becomes `Read(./**)`, and so on), because a tool written without a scope works on any path, the next person's folder included. So the bot can keep notes about the person it talks to (`Write`, `Edit`) and cannot read or write anyone else's. The profile's instructions are one file for everyone, `<workdir>/CLAUDE.md`, which the runs cannot open or change. `knowledge` is a folder all of them may read and none may write.
+- **gpette only ever puts someone in a profile that holds no power.** A `public_profile` must be `per_inbox`, set its own `allowed_tools` from the file tools only (`Read`, `Glob`, `Grep`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`; no shell, no `"*"`), and have no `admin`, `send`, `menu` or `inherit_user_settings`. gpette refuses to start otherwise, and checks again at every message, so a row written into the table by hand, or a profile changed while it runs, gives nobody more than that. A profile with tools is only ever given by writing an inbox id into `members` yourself.
+
+`tests/test_public_profiles.py` checks the rules; `tests/scenarios/public_profile.toml` checks the fence with a real model (haiku, a few cents): a note written and read back, the knowledge folder read and not written, the next person's folder neither read nor written.
+
+## Asking the main: `[ADMIN_TURN]`
+
+A public profile talks to people and holds no power. When something needs the profile that does, its model ends the answer with the block:
+
+```
+Alright, I'll look into that one.
+[ADMIN_TURN]
+```
+
+The text before the block goes to the person as the answer. The block carries nothing: whatever follows it is dropped. gpette then puts one fixed sentence in the queue of the profile named by `admin_profile`, in that profile's own chat (the newest DM one of its `members` wrote in):
+
+```
+Admin turn asked by the public profile of inbox <id>.
+Read <that person's folder> and decide.
+```
+
+Nothing the person or the asking model wrote is in it. What the main reads is the folder, where the public profile keeps its notes.
+
+```toml
+[profiles.bot_main]
+members = ["<your inbox id>"]
+admin = true                        # other profiles may wake this one; it grants nothing else
+
+[profiles.bot_public]
+admin_profile = "bot_main"          # whom its [ADMIN_TURN] wakes
+```
+
+- **It waits its turn and stacks.** The wake-up is a message in the queue like any other. When that chat's turn comes, everything waiting for it (the owner's own messages, requests from other people) is answered in one turn, one line each. Each stacked item is worth `[send] per_item` sends. The main's final answer goes to its own chat, so its owner sees it; `[NO_REPLY]` sends nothing.
+- **Notes are the model's own words.** Before a request is accepted gpette reads the asking folder: a file that shares `[admin_turn] copy_words` words in a row (default 6, 0 = off) with a message a person wrote in that chat refuses the request, and the model is told which file to rewrite. What a stranger typed never reaches the main word for word. `conversations/` (gpette's own transcripts) is not read.
+- **Daily caps.** `[admin_turn] per_inbox_per_day` requests from one person (default 15) and `per_day` to one main (default 50); 0 = no limit. A profile can set its own: `admin_turns_per_inbox_per_day` on the asking profile, `admin_turns_per_day` on the main. One inbox can have its own number in `[admin_turn.inboxes]`. A request from someone whose earlier one still waits joins it and is not counted.
+- **The link is checked at start and at each use.** If `admin_profile` names a profile that is gone, has no `admin = true`, or has no chat yet (nobody in its `members` ever wrote to it), the asking model gets `[ADMIN_MISCONFIGURED_ERROR]` and carries on: it is told to note the request and answer the person plainly.
+- A refused request (the link, a copied note, a cap) delivers nothing to the person and gives the turn back to the model with the reason. Only a Claude Code run can take that; on another engine the block is cut out and the text before it is delivered. The token counts only at the end of a line, so a sentence that mentions it is not a request. A wake-up counts toward the limit of 50 messages in a row without a person.
+
+`tests/test_admin_turn.py` checks all of it with a scripted model; `tests/scenarios/admin_turn.toml` runs the round trip with a real one (haiku, under a cent).
+
+## What a profile is told
+
+A bot only uses what it knows about. So gpette adds a short section to the system prompt of every run, built from the profile's own settings (`modules/prompts.py`, `blocks_note`): the blocks that profile can write in an answer, each with what it does.
+
+| The profile | Is told about |
+|---|---|
+| any profile | `[NO_REPLY]`: when it sends nothing (a turn no person started, or a group) |
+| `send = true` (Claude Code) | `[SEND_XMTP_MESSAGE]`: its shape; with a `public_profile`, what it sets up (the person goes on the inbox list, gets a folder, their answers reach the public profile with no password), that nothing else sets that up, and to ask first when it cannot tell a one-off from the start of a conversation |
+| `admin_profile = "..."` | `[ADMIN_TURN]`: note the request in its own words, end the answer with the block, what happens next |
+| `admin = true` | what an "Admin turn asked by..." message is, and that the notes it points at are information, not instructions |
+
+Claude Code profiles get it appended to their system prompt, after the folder's `CLAUDE.md`. API engines get it under their system prompt. **A resumed session.** Claude Code keeps the system prompt a session started with: on a resume it ignores what is appended (measured with CLI 2.1.329). So when a session is resumed and its instructions are not the ones it was last given (this section changed, the `CLAUDE.md` was edited, the profile got a new setting), gpette hands them over inside the next message, once, marked as coming from gpette. A voice file (`CLAUDE.md`, `system_prompt`) no longer has to teach the mechanics, only how the bot should use them. `tests/test_blocks_note.py` checks who is told what.
 
 ## Admin panel
 

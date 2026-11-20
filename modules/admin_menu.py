@@ -2,7 +2,7 @@
 
 The menu
 --------
-A profile with `admin = true` gets `/menu`: a message of buttons (the
+A profile with `menu = true` gets `/menu`: a message of buttons (the
 `coinbase.com/actions` content type; xmtp_daemon sends it, apps that know it
 show buttons, every other app shows the numbered fallback text). A pressed
 button comes back as an intent (`contentType: "intent"`), a typed number works
@@ -146,7 +146,7 @@ def _describe(kind, reason, profile):
     }[kind]
     model = profile.model or 'default'
     text = f"{head} ({model}).\n{(reason or '').strip()[:500]}"
-    if profile.admin:
+    if getattr(profile, 'menu', False):
         text += "\n\n/menu to switch the model or pause the timers."
     return text
 
@@ -417,7 +417,7 @@ def menu_action(message, profile):
     """The menu action this message asks for (a button id), or None when it is
     ordinary chat. A pressed button, `/menu`, `/status`, `/model [name]`, or a
     typed number right after a menu."""
-    if not getattr(profile, 'admin', False):
+    if not getattr(profile, 'menu', False):
         return None
     ctype = message.get('contentType') or 'text'
     text = _text_of(message)
@@ -479,7 +479,7 @@ def failure_notice(message, profile, error):
         # A typed number is a press too: `handle` closes the menu it answers
         # before acting, so by now `menu_action` no longer sees one.
         text = _text_of(message)
-        if not (getattr(profile, 'admin', False) and text.isdigit()):
+        if not (getattr(profile, 'menu', False) and text.isdigit()):
             return None
         action = text
     return _text(message.get('conversationId'),

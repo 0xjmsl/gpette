@@ -90,8 +90,10 @@ check("a timer in a listed group fires as the group's profile, whoever set it",
       fire("group_club", "club", "owner", group=True)[0] == "club")
 name, why = fire("group_club", "me", "owner", group=True)
 check("the owner does not get their own profile in a listed group", name is None and "belongs to profile 'club'" in why, why)
-check("a timer in an unlisted group fires as its setter's profile",
-      fire("group_loose", "me", "owner", group=True)[0] == "me")
+name, why = fire("group_loose", "me", "owner", group=True)
+check("a timer in an unlisted group does not fire as its setter's profile (a group is never matched by a sender)",
+      name is None and "belongs to profile 'group'" in why, why)
+check("it fires as the group sandbox", fire("group_loose", "group", "owner", group=True)[0] == "group")
 
 # two people with different profiles write in one chat: the timer stays its setter's
 profiles.resolve_profile("dm_owner", "owner", "dm")

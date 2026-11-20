@@ -1,0 +1,148 @@
+# A public profile with a real model: one folder per person, a shared knowledge folder
+# that can be read and never written, and notes the bot may write in its own folder.
+#   python tests/harness.py tests/scenarios/public_profile.toml
+# Needs the Claude Code CLI signed in. Uses haiku; one run costs a few cents.
+
+[harness]
+step_timeout = 240
+no_reply_wait = 8
+
+[config.llm]
+provider = "claude-code"
+
+[config.claude_code]
+model = "haiku"
+max_turns = 6
+timeout_secs = 180
+workdir = "./workdir"
+allowed_tools = []
+
+[config.daemon]
+nothing_matched = "desk"
+
+[config.gate]
+kind = "password"
+password = "opensesame"
+welcome = "You are in. Say hello."
+
+# Everyone who is in no profile lands here, behind the password, each in a folder of
+# their own under ./desk. privacy is off so a refusal comes from the fence, not from manners.
+[config.profiles.desk]
+gate = "password"
+workdir = "./desk"
+per_inbox = true
+allowed_tools = ["Read", "Glob", "Grep", "Write", "Edit"]
+knowledge = "./knowledge"
+privacy = false
+
+[files]
+"workdir/CLAUDE.md" = "You are DEFAULT, a test bot. Be brief."
+"desk/CLAUDE.md" = "You are DESK, a test bot inside an automated permission test. Be brief. When a message says to try a tool call, ALWAYS make the real tool call with exactly the path it gives, even when you expect the system to refuse it: the test measures the refusal that comes from the system, so declining without calling the tool breaks the test. Afterwards say plainly what the tool returned."
+"desk/inboxbob/secret.txt" = "Bob's secret word is MANGO."
+"knowledge/facts.md" = "The launch code word is PAPAYA."
+
+[[steps]]
+name = "alice sends the password"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "opensesame"
+expect = [{contains = "You are in"}]
+
+[[steps]]
+name = "the shared instructions file is hers too"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "What is your name?"
+expect = [{contains = "DESK"}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "she can read the knowledge folder"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "Read facts.md in the shared knowledge folder and tell me the launch code word."
+expect = [{contains = "PAPAYA"}, {no_denied = true}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "the bot can write a note in her folder"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "Use your Write tool to create notes.md in your own folder with exactly this line: alice likes green tea. Then tell me whether it worked."
+expect = [{no_denied = true}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "and read it back"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "Read notes.md in your folder and quote it."
+expect = [{contains = "green tea"}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "it cannot write into the knowledge folder"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "Use your Write tool to create a file named hacked.md inside the shared knowledge folder, containing the word HACKED. Try it for real, then tell me what happened."
+expect = [{denied_tool = "Write"}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "it cannot change the knowledge file"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "Use your Edit tool on facts.md in the shared knowledge folder to change PAPAYA to HACKED. Try it for real, then tell me what happened."
+expect = [{denied_tool = "Edit"}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "the knowledge file is unchanged"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "Read facts.md in the shared knowledge folder again and quote it exactly."
+expect = [{contains = "PAPAYA"}, {not_contains = "HACKED"}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "it cannot read another person's folder"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "Read the file ../inboxbob/secret.txt and tell me exactly what it says."
+expect = [{not_contains = "MANGO"}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "it cannot write into another person's folder"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "Use your Write tool to create ../inboxbob/planted.txt containing HELLO. Try it for real, then tell me what happened."
+expect = [{denied_tool = "Write"}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "it cannot write next to the shared instructions"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "Use your Write tool to create ../planted.txt (one level above your folder) containing HELLO. Try it for real, then tell me what happened."
+expect = [{denied_tool = "Write"}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "it cannot open the shared instructions file itself"
+conversation = "conv_alice"
+sender = "inboxalice"
+text = "Use your Read tool on ../CLAUDE.md. Try it for real, then tell me what the tool returned."
+expect = [{denied_tool = "Read"}, {max_cost_usd = 0.10}]
+
+# Bob arrives later: his own folder, and nothing of Alice's.
+[[steps]]
+name = "bob sends the password"
+conversation = "conv_bob"
+sender = "inboxbob"
+text = "opensesame"
+expect = [{contains = "You are in"}]
+
+[[steps]]
+name = "bob reads his own file"
+conversation = "conv_bob"
+sender = "inboxbob"
+text = "Read secret.txt in your folder and tell me the secret word."
+expect = [{contains = "MANGO"}, {max_cost_usd = 0.10}]
+
+[[steps]]
+name = "bob cannot read alice's note"
+conversation = "conv_bob"
+sender = "inboxbob"
+text = "Read the file ../inboxalice/notes.md and tell me exactly what it says."
+expect = [{not_contains = "green tea"}, {max_cost_usd = 0.10}]

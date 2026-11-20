@@ -76,6 +76,22 @@ def register_routes(server, on_incoming, on_group_members):
     logging.info("xmtp_http_bridge: routes registered (/api/xmtp/incoming, /api/xmtp/group_members)")
 
 
+def daemon_call(url, path, body, timeout=60):
+    """One POST to a daemon, for callers that must know WHY it failed (the
+    [SEND_XMTP_MESSAGE] block tells the model). Returns (json, None), or
+    (None, reason). No retry: the caller decides."""
+    try:
+        r = requests.post(f"{str(url).rstrip('/')}{path}", json=body, timeout=timeout)
+    except requests.RequestException as e:
+        return None, f"the daemon did not answer ({type(e).__name__})"
+    if r.ok:
+        try:
+            return r.json(), None
+        except ValueError:
+            return {}, None
+    return None, f"the daemon answered {r.status_code} {r.text[:160].strip()}".strip()
+
+
 def send_via_daemon(message, attempts=3):
     """POST one outgoing message to the daemon. A few quick retries cover a
     daemon restart; a 4xx means the message itself is bad, so no retry.

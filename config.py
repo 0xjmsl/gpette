@@ -53,6 +53,8 @@ ALL_CLAUDE_TOOLS = (
 class Config:
     # --- connection to xmtp_daemon -------------------------------------------------
     XMTP_DAEMON_URL = 'http://127.0.0.1:3100'
+    NOTHING_MATCHED = None                     # [daemon] nothing_matched: unset | "" (silent) | a profile name
+    NOTHING_MATCHED_GROUPS = False             # does that also answer groups no profile lists
 
     # --- this server -----------------------------------------------------------------
     API_HOST = '127.0.0.1'                     # keep local: the web UI and /api/config are not authenticated
@@ -104,7 +106,7 @@ class Config:
     CLAUDE_CODE_INHERIT_USER_SETTINGS = False   # True = also load the host user's CLAUDE.md, memory and permissions
     CLAUDE_CODE_FENCED_TIMEOUT = 180            # cap for no-tools runs (they can stall)
     CLAUDE_CODE_TRANSCRIPTS = False             # write conversations/<owner>/ files the bot can read
-    CLAUDE_CODE_GROUPS = 'sandbox'              # groups in no profile: sandbox (empty, no tools) | default
+    CLAUDE_CODE_GROUPS = 'sandbox'              # groups in no profile: sandbox (empty, no tools) | default | none (not answered)
     CLAUDE_CODE_SYSTEM_PROMPT = (
         "You are running as a gpette chat bot. Messages arrive over XMTP chat, not a terminal. "
         "Respond conversationally. Timer fires are automated system events: act on the instructions naturally.")
@@ -127,6 +129,16 @@ class Config:
     GATE_LIMIT_REPLY = 'No more new people today. Please try again tomorrow.'
     GATE_NEW_PEOPLE_PER_DAY = 10
     GATE_MESSAGES_PER_PERSON_PER_DAY = 0       # 0 = no cap
+
+    # --- [SEND_XMTP_MESSAGE] (modules/send_block.py; a profile needs send = true) -------
+    SEND_PER_ITEM = 3                          # sends a turn gets for each timer fire or stacked message
+    SEND_MAX_PER_TURN = 15                     # and never more than this in one turn
+
+    # --- [ADMIN_TURN] (modules/admin_turn.py; a profile needs admin_profile) ------------
+    ADMIN_TURN_PER_INBOX_PER_DAY = 15          # requests one person's chat may raise per day; 0 = no limit
+    ADMIN_TURN_PER_DAY = 50                    # requests one main takes per day; 0 = no limit
+    ADMIN_TURN_COPY_WORDS = 6                  # a note sharing this many words in a row with a person's message is a copy; 0 = off
+    ADMIN_TURN_INBOXES = {}                    # [admin_turn.inboxes]: inbox id -> its own per-day number
 
     # --- profiles (filled from [profiles.*]) -------------------------------------------
     PROFILES = {}
@@ -186,6 +198,8 @@ class Config:
 # TOML key -> Config attribute (+ whether it is a path to resolve).
 _MAP = {
     'daemon.url': ('XMTP_DAEMON_URL', False),
+    'daemon.nothing_matched': ('NOTHING_MATCHED', False),
+    'daemon.nothing_matched_groups': ('NOTHING_MATCHED_GROUPS', False),
     'server.host': ('API_HOST', False),
     'server.port': ('API_PORT', False),
     'server.debug': ('DEBUG', False),
@@ -230,6 +244,11 @@ _MAP = {
     'gate.limit_reply': ('GATE_LIMIT_REPLY', False),
     'gate.new_people_per_day': ('GATE_NEW_PEOPLE_PER_DAY', False),
     'gate.messages_per_person_per_day': ('GATE_MESSAGES_PER_PERSON_PER_DAY', False),
+    'send.per_item': ('SEND_PER_ITEM', False),
+    'send.max_per_turn': ('SEND_MAX_PER_TURN', False),
+    'admin_turn.per_inbox_per_day': ('ADMIN_TURN_PER_INBOX_PER_DAY', False),
+    'admin_turn.per_day': ('ADMIN_TURN_PER_DAY', False),
+    'admin_turn.copy_words': ('ADMIN_TURN_COPY_WORDS', False),
     'compaction.provider': ('COMPACTION_PROVIDER', False),
     'compaction.model': ('COMPACTION_MODEL', False),
     'compaction.after': ('COMPACTION_AFTER', False),
@@ -266,7 +285,7 @@ def _apply(cfg):
     Config.PROFILES = {}
     for name, p in profiles.items():
         p = dict(p)
-        for key in ('workdir', 'system_prompt_file'):
+        for key in ('workdir', 'system_prompt_file', 'knowledge'):
             if p.get(key):
                 p[key] = _abs(p[key])
         Config.PROFILES[name] = p
@@ -276,6 +295,9 @@ def _apply(cfg):
     Config.PLUGINS = {name: dict(v) for name, v in (_get(cfg, 'plugins', {}) or {}).items()
                       if isinstance(v, dict)}
     Config.FILTER = dict(_get(cfg, 'filter', {}) or {})
+    named = _get(cfg, 'admin_turn.inboxes', {}) or {}
+    Config.ADMIN_TURN_INBOXES = {str(k).strip().lower().removeprefix('0x'): v
+                                 for k, v in named.items()} if isinstance(named, dict) else {}
 
 
 def plugin_settings(name):
@@ -337,6 +359,8 @@ OVERRIDE_TYPES = {
     'SESSION_ROUTING': str, 'GATE_KIND': str, 'GATE_PASSWORD': str,
     'GATE_WELCOME': str, 'GATE_LIMIT_REPLY': str,
     'GATE_NEW_PEOPLE_PER_DAY': int, 'GATE_MESSAGES_PER_PERSON_PER_DAY': int,
+    'SEND_PER_ITEM': int, 'SEND_MAX_PER_TURN': int,
+    'ADMIN_TURN_PER_INBOX_PER_DAY': int, 'ADMIN_TURN_PER_DAY': int, 'ADMIN_TURN_COPY_WORDS': int,
 }
 for _key, _val in _load_overrides().items():
     if hasattr(Config, _key):
