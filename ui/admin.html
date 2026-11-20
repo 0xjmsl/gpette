@@ -68,11 +68,15 @@ function pill(decision) {
   const cls = /ignore/.test(d) ? 'ignore' : /reject/.test(d) ? 'reject' : /auth_/.test(d) ? 'auth' : 'allow';
   return `<span class="pill ${cls}">${esc(d)}</span>`;
 }
+function when(at) {   // dd-mm-yyyy hh:mm:ss, local time
+  const d = new Date(at * 1000), p = n => String(n).padStart(2, '0');
+  return `${p(d.getDate())}-${p(d.getMonth() + 1)}-${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
 async function load() {
   const r = await fetch('/api/admin/routes').then(r => r.json());
   const tb = document.querySelector('#routes tbody');
   tb.innerHTML = r.routes.map(x => `<tr>
-    <td class="mono">${new Date(x.at * 1000).toLocaleString()}</td>
+    <td class="mono">${when(x.at)}</td>
     <td>${esc(x.kind)}</td>
     <td>${short(x.conversation_id)}</td>
     <td>${x.sender_name ? esc(x.sender_name) + ' ' : ''}${short(x.sender)}</td>
