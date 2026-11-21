@@ -20,9 +20,9 @@ Config.DATA_DIR = tempfile.mkdtemp(prefix="gpette_routing_")
 Config.CLAUDE_CODE_GROUP_CWD = os.path.join(Config.DATA_DIR, "groups")
 Config.INBOXES = {}
 Config.PROFILES = {
-    "bot_main": {"members": ["owner"], "admin": True, "menu": True, "gate": "open",
+    "bot_main": {"members": ["owner", "f" * 64], "admin": True, "menu": True, "gate": "open",
                  "allowed_tools": ["Read"], "workdir": os.path.join(Config.DATA_DIR, "main")},
-    "bot_public": {"members": ["guest"], "admin_profile": "bot_main"},
+    "bot_public": {"members": ["guest"], "admin_profile": "bot_main", "admin_inbox": "f" * 64},
     "club": {"members": ["group_listed"], "gate": "open"},
     "old_style": {"members": ["oldowner"], "admin": True},
     "quiet_admin": {"members": ["quiet"], "admin": True, "menu": False},

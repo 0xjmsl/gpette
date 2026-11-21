@@ -63,6 +63,7 @@ workdir = "{DATA}/public"
 per_inbox = true
 allowed_tools = ["Read", "Write"]
 admin_profile = "bot_main"
+admin_inbox = "{OWNER}"
 ''')
 os.environ["GPETTE_CONFIG"] = CONFIG
 
@@ -170,19 +171,33 @@ A_FOLDER = os.path.join(DATA, "public", ALICE)
 MAIN_CHAT, A_CHAT, B_CHAT = "dm_" + OWNER[:4], "dm_" + ALICE[:4], "dm_" + BOB[:4]
 PLAIN = "I have noted your request and will get back to you as soon as I can."
 
-# 1. the main has no chat yet (its owner never wrote): the link cannot deliver
-sent = turn([(ALICE, "hello, could somebody look at my account today")],
-            ["Sure.\n[ADMIN_TURN]", PLAIN], wait_heard=2)
-check("with no chat to wake the main in, the asking model gets the error",
-      heard[1]["role"] == "tool" and heard[1]["text"].startswith(admin_turn.ERROR), heard[1:])
-check("the error names no profile and no path", "bot_main" not in heard[1]["text"] and DATA not in heard[1]["text"])
-check("the answer that held the block did not reach the person, the next one did", sent == {A_CHAT: [PLAIN]}, sent)
+# 1. the link comes from the config: the main and the inbox it is woken for
+opened = []
 
-# 2. the owner writes: the main has its chat
+
+def fake_daemon(url, path, body):
+    opened.append((path, body))
+    return {"conversationId": "dm_" + body["inboxId"][:4]}, None
+
+
+admin_turn.daemon_call = fake_daemon
+check("the link is admin_profile + admin_inbox", profiles.admin_link("bot_public") == ("bot_main", OWNER, None),
+      profiles.admin_link("bot_public"))
+check("its DM is opened through the daemon, with no chat in history",
+      profiles.main_conversation("bot_main", OWNER, call=fake_daemon) == (MAIN_CHAT, None) and opened == [("/dm", {"inboxId": OWNER})],
+      opened)
+check("and remembered: no second /dm", profiles.main_conversation("bot_main", OWNER, call=fake_daemon) == (MAIN_CHAT, None) and len(opened) == 1,
+      opened)
+Config.PROFILES["bot_public"]["admin_inbox"] = BOB
+check("an admin_inbox that is not a member of the main is refused",
+      profiles.admin_link("bot_public")[2] and "not one of the members" in profiles.admin_link("bot_public")[2])
+Config.PROFILES["bot_public"]["admin_inbox"] = ""
+check("admin_profile with no admin_inbox is refused", "no admin_inbox" in (profiles.admin_link("bot_public")[2] or ""))
+Config.PROFILES["bot_public"]["admin_inbox"] = OWNER
+
+# 2. the owner writes: answered by the main in that same DM
 sent = turn([(OWNER, "good morning")], ["Morning."], wait_heard=1)
 check("the owner is answered by the main profile", heard[0]["profile"] == "bot_main" and sent == {MAIN_CHAT: ["Morning."]}, sent)
-check("that DM is where the main is woken", profiles.main_conversation("bot_main", db) == (MAIN_CHAT, None),
-      profiles.main_conversation("bot_main", db))
 
 # 3. a request: the text goes to the person, the fixed sentence to the main
 sent = turn([(ALICE, "can you please add my personal feed to the big public list")],

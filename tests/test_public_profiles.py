@@ -44,6 +44,7 @@ per_inbox = true
 allowed_tools = ["Read", "Glob", "Grep"]
 knowledge = "{DATA.replace(chr(92), "/")}/knowledge"
 admin_profile = "bot_main"
+admin_inbox = "{'0' * 64}"
 ''')
 os.environ["GPETTE_CONFIG"] = CONFIG
 

@@ -37,10 +37,12 @@ def blocks_note(profile, claude_code=True) -> str:
     parts = [
         "What you can do here besides answering. These are blocks you write in your answer; "
         "gpette acts on them and the people you talk to never see them.",
-        "[NO_REPLY]: answer with exactly this and nothing else, and nothing is sent. It works "
-        "when the turn was not started by a person writing to you (a timer fired, a result came "
-        "back, you were woken for an admin turn) and in a group chat. In a one-to-one chat a "
-        "person's message always gets an answer.",
+        "[NO_REPLY]: answer with exactly this and nothing else, and nothing is sent, "
+        "whatever started the turn. It is for a turn that has nothing to say (a timer's quiet "
+        "work, an admin turn, a group you have nothing to add to). A person who wrote to you "
+        "and gets [NO_REPLY] gets silence, so do not use it on them. Only the last text of a "
+        "turn is delivered: text you wrote earlier in the same turn is not, so if the turn "
+        "goes on after your answer, your last text must be that answer again, not [NO_REPLY].",
     ]
     if getattr(profile, 'send', False) and claude_code:
         public = getattr(profile, 'public_profile', '') or ''

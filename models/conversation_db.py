@@ -353,23 +353,6 @@ class SQLiteConversationDB:
         rows = self._query(sql, tuple(params))
         return int(rows[0]['n']) if rows else 0
 
-    def dm_conversations_of(self, inbox_ids):
-        """The DMs these inboxes wrote in, newest first: [(conversation id, sender inbox)].
-        How a main's own chat is found for an admin turn (modules/profiles.main_conversation)."""
-        ids = [str(i).strip().lower() for i in (inbox_ids or []) if str(i or '').strip()]
-        if not ids:
-            return []
-        marks = ','.join(['?'] * len(ids))
-        rows = self._query(f"""
-        SELECT m.conversation_id AS conversation_id, m.sender_inbox_id AS sender, MAX(m.timestamp) AS ts
-        FROM messages_v2 m
-        JOIN conversations c ON c.conversation_id = m.conversation_id
-        WHERE c.is_group = 0 AND m.role = 'user' AND lower(m.sender_inbox_id) IN ({marks})
-        GROUP BY m.conversation_id, m.sender_inbox_id
-        ORDER BY ts DESC
-        """, tuple(ids))
-        return [(r['conversation_id'], r['sender']) for r in rows]
-
     # ------------------------------------------------------------------ conversations
 
     def track_conversation(self, conversation_id, is_group=False):

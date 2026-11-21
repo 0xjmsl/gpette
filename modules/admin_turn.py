@@ -30,8 +30,10 @@ nothing to the person and hands the turn back to the asking model with the
 reason (a Claude Code run resumes with it; on another engine the block is cut
 out and the rest of the answer is delivered):
 
-- the link: `admin_profile` names a profile that exists, has `admin = true`
-  and has a chat to be woken in. If not: `[ADMIN_MISCONFIGURED_ERROR]`.
+- the link: `admin_profile` names a profile that exists and has `admin = true`,
+  and `admin_inbox` names the one inbox (one of its members) it is woken FOR. The
+  main is woken in its DM with that inbox, opened through the daemon when needed;
+  nothing is looked up from history. If not: `[ADMIN_MISCONFIGURED_ERROR]`.
 - the notes are the model's own words. A run of `[admin_turn] copy_words` words
   (default 6) that a person wrote in this chat, found in a file of the folder,
   refuses the request until the note is rewritten: what a stranger typed must
@@ -64,6 +66,7 @@ _MAX_MESSAGES = 300
 
 _lock = threading.Lock()
 _pending = set()                        # (the main's conversation, who asked): waiting in the queue
+daemon_call = None                      # (url, path, body) -> (json, None) | (None, reason); None = the HTTP bridge's (tests set a fake)
 
 
 # --- reading the block ---------------------------------------------------------------
@@ -193,10 +196,10 @@ def ask(profile, conversation_id, db):
     `wake` (when not None) goes into the thread controller's queue."""
     from modules import profiles
     asker = getattr(profile, "name", "?")
-    target, why = profiles.admin_target(profile)
+    target, admin_inbox, why = profiles.admin_link(profile)
     if why:
         return _misconfigured(asker, why)
-    main_conversation, why = profiles.main_conversation(target, db)
+    main_conversation, why = profiles.main_conversation(target, admin_inbox, call=daemon_call)
     if why:
         return _misconfigured(asker, why)
     person = getattr(profile, "folder_key", "") or profiles.last_sender(conversation_id)

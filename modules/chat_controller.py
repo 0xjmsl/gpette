@@ -16,8 +16,7 @@ from memory.manager import MemoryManager
 from modules.profiles import resolve_profile, profile_for_conversation, profile_for_timer, register_outreach
 from modules import group_pace, send_block, admin_turn
 
-# A timer fire or a group turn that answers exactly this sends nothing back.
-# A DM always gets its answer.
+# An answer that is exactly this sends nothing back, whatever started the turn.
 NO_REPLY_TOKEN = "[NO_REPLY]"
 
 
@@ -273,15 +272,13 @@ class ChatController:
             # [ADMIN_TURN]: the text before it is the answer; the main gets a wake-up.
             if self._caught_admin_turn(service_response, profile, service, conversation_id, message.get("kind")):
                 return None
-            # The end of a turn that sent messages on the way, or that an [ADMIN_TURN]
-            # started with no person in it: [NO_REPLY] holds here too.
-            if message.get("source") in (send_block.SOURCE, admin_turn.SOURCE) \
-                    and self._is_no_reply(service_response.get("content")):
-                log_message_flow("ChatController", "SYSTEM", "send_turn_no_reply", conversation_id,
+            # [NO_REPLY] sends nothing, whatever started the turn.
+            if not is_group and self._is_no_reply(service_response.get("content")):
+                log_message_flow("ChatController", "SYSTEM", "no_reply", conversation_id,
                                  f"answered {NO_REPLY_TOKEN}, nothing sent")
                 return None
-            # A group answer: [NO_REPLY] sends nothing, and a bot that posted there
-            # less than group_reply_secs ago is held back (its tools already ran).
+            # A group answer: the same, and a bot that posted there less than
+            # group_reply_secs ago is held back (its tools already ran).
             if is_group and not service_response.get("tool_calls") and                     not self._group_may_send(conversation_id, service_response.get("content"), "group_turn"):
                 return None
             now = datetime.datetime.now()
@@ -361,7 +358,7 @@ class ChatController:
                 return self._answer_alone(extras)   # the fire is refused, the messages are not
             extras = [m for m in extras if not admin_turn.is_wake(m)
                       or (m.get("adminProfile") == profile.name and profile.admin)]
-            # A person in a one-to-one chat must be answered; in a group [NO_REPLY] stays open.
+            # A person in a one-to-one chat is named as waiting for an answer.
             people = [] if is_group else [m for m in extras if not admin_turn.is_wake(m)]
 
             skip_session = bool(timer_data.get('skip_session', False))
@@ -451,9 +448,8 @@ class ChatController:
                 return None
             # A timer fire may decide there is nothing worth saying (quiet hours,
             # silent upkeep). Replying with exactly NO_REPLY_TOKEN ends the run
-            # without sending anything. Not when a person's message rode along: a
-            # person always gets an answer.
-            if not people and self._is_no_reply(service_response.get("content")):
+            # without sending anything, also when a person's message rode along.
+            if self._is_no_reply(service_response.get("content")):
                 log_message_flow("ChatController", "SYSTEM", "timer_no_reply", conversation_id,
                                  f"timer={timer_data.get('timer_id')} answered {NO_REPLY_TOKEN}, nothing sent")
                 return None
@@ -628,8 +624,7 @@ class ChatController:
         text = ("\n\nAlso waiting in this chat when the timer fired. Handle these in this same "
                 "turn, after or along with the timer's work:\n" + "\n".join(lines))
         if people:
-            text += ("\n\nA person wrote, so this turn ends with an answer to them: "
-                     f"{NO_REPLY_TOKEN} does not apply here.")
+            text += "\n\nA person wrote: end this turn with your answer to them."
         return text
 
     def _merge_batch(self, message, batch, is_group):

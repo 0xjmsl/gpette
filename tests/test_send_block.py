@@ -275,6 +275,9 @@ sent = turn("dm_owner", "owner", ["tell X, say nothing to me"],
             [block(X, "psst"), "[NO_REPLY]"], wait_heard=2)
 time.sleep(0.5)
 check("[NO_REPLY] after a send delivers nothing", sent == [] and len(D.sends()) == 1, (sent, D.sends()))
+sent = turn("dm_owner", "owner", ["anything?"], ["[NO_REPLY]"], wait_heard=1)
+time.sleep(0.5)
+check("[NO_REPLY] to a person's own message delivers nothing too", sent == [], sent)
 
 # --- the boot check -----------------------------------------------------------------------
 profiles.check_config()

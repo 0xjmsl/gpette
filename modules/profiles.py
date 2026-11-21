@@ -45,6 +45,10 @@ Every profile key is optional and falls back to the top-level value:
                         nothing else: tools and folder stay what the profile says
     admin_profile       the profile this one's [ADMIN_TURN] wakes ('' = none). It must exist
                         and have admin = true: checked at boot and again at each use
+    admin_inbox         with admin_profile: the inbox id the main is woken FOR. The wake-up
+                        goes to the main's DM with exactly this inbox (opened through the
+                        daemon if it does not exist yet). It must be one of the main's
+                        members. Nothing is looked up from history
     admin_turns_per_inbox_per_day   on the asking profile: requests one person may raise a day
     admin_turns_per_day             on the woken profile: requests it takes a day (0 = no limit;
                         defaults in [admin_turn], modules/admin_turn.py)
@@ -68,6 +72,7 @@ Defaults are read from Config at resolve time, so runtime edits apply.
 """
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Optional
@@ -641,31 +646,65 @@ def last_sender(conversation_id):
         return _last_sender.get(conversation_id, '')
 
 
-def main_conversation(target, db=None):
-    """(conversation id, None) for the chat profile `target` is woken in by an
-    `[ADMIN_TURN]`: the newest DM that one of its `members` wrote in and that still
-    resolves to it today (at its own inbox, when it is bound to one). Or (None,
-    reason): a main nobody has written to yet has no chat to be woken in."""
-    raw = (Config.PROFILES or {}).get(target)
-    if not isinstance(raw, dict):
-        return None, f"profile '{target}' is not in the config"
-    members = [_norm(m) for m in (raw.get('members') or []) if _norm(m)]
-    if not members:
-        return None, f"profile '{target}' has no members, so it has no chat to be woken in"
-    bound = _inbox_of(raw)
-    try:
-        found = (db or _db()).dm_conversations_of(members)
-    except Exception as e:
-        return None, f"the chats of profile '{target}' could not be read ({e})"
-    for conversation_id, sender in found:
-        inbox = None
-        if inboxes.configured():
-            inbox = inboxes.of_conversation(conversation_id)
-            if bound and inbox != bound:
-                continue
-        if _pick_for(conversation_id, sender, False, inbox)[0] == target:
-            return conversation_id, None
-    return None, f"no member of profile '{target}' has written to it yet, so it has no chat to be woken in"
+_INBOX_ID = re.compile(r'^[0-9a-f]{64}$')
+_main_chats = {}                     # (main profile, inbox) -> the DM it is woken in
+_main_lock = threading.Lock()
+
+
+def admin_link(profile_or_name):
+    """(main profile, inbox id, None) for whom a `[ADMIN_TURN]` from this profile wakes
+    and for which inbox, or (None, None, reason). Both come from the config
+    (`admin_profile` + `admin_inbox`); nothing is guessed."""
+    target, why = admin_target(profile_or_name)
+    if why:
+        return None, None, why
+    name = getattr(profile_or_name, 'name', profile_or_name)
+    raw = (Config.PROFILES or {}).get(name) or {}
+    inbox = _norm(raw.get('admin_inbox')).removeprefix('0x')
+    if not inbox:
+        return None, None, f"profile '{name}' has admin_profile but no admin_inbox (the inbox its main is woken for)"
+    if not _INBOX_ID.match(inbox):
+        return None, None, f"admin_inbox of profile '{name}' is not an inbox id (64 hex characters)"
+    members = [_norm(m).removeprefix('0x') for m in ((Config.PROFILES or {}).get(target) or {}).get('members') or []]
+    if inbox not in members:
+        return None, None, f"admin_inbox of profile '{name}' is not one of the members of '{target}'"
+    return target, inbox, None
+
+
+def main_conversation(target, inbox, call=None):
+    """(conversation id, None) for the DM of main profile `target` with `inbox`: the
+    chat an `[ADMIN_TURN]` wakes it in. Opened (or found) through the daemon of the
+    inbox `target` speaks through, once, then remembered. Or (None, reason)."""
+    key = (target, inbox)
+    with _main_lock:
+        known = _main_chats.get(key)
+    if known:
+        return _bind_main(known, target, inbox)
+    raw = (Config.PROFILES or {}).get(target) or {}
+    name = _inbox_of(raw) or None
+    url = (inboxes.url_of(name) if name else '') or str(Config.XMTP_DAEMON_URL).rstrip('/')
+    if call is None:
+        from server.xmtp_http_bridge import daemon_call as call
+    data, why = call(url, '/dm', {'inboxId': inbox})
+    if why:
+        return None, f"the DM of '{target}' with its admin_inbox could not be opened ({why})"
+    conversation = (data or {}).get('conversationId')
+    if not conversation:
+        return None, f"the daemon opened no DM for '{target}' and its admin_inbox"
+    if name:
+        inboxes.note(conversation, name)                 # the main's answer leaves through its inbox
+    with _main_lock:
+        _main_chats[key] = conversation
+    return _bind_main(conversation, target, inbox)
+
+
+def _bind_main(conversation, target, inbox):
+    """Tie the DM to its main the same way a message from `inbox` would (so a chat
+    nobody wrote in yet still answers as `target`), and check it really does."""
+    profile = resolve_profile(conversation, inbox, 'dm')
+    if profile.name != target:
+        return None, f"the DM with admin_inbox resolves to profile '{profile.name}', not '{target}'"
+    return conversation, None
 
 
 def check_config():
@@ -676,7 +715,7 @@ def check_config():
         if not isinstance(raw, dict):
             continue
         if str(raw.get('admin_profile') or '').strip():
-            _, reason = admin_target(name)
+            _, _, reason = admin_link(name)
             if reason:
                 raise ValueError(f"[profiles.{name}]: {reason}")
         target = str(raw.get('public_profile') or '').strip()

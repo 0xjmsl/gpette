@@ -160,6 +160,7 @@ summary_words = 1000
 # allowed_tools = ["Read", "Glob", "Grep"]
 # knowledge = "./knowledge"          # a folder every run of this profile may also read
 # admin_profile = "me"               # the profile its [ADMIN_TURN] wakes
+# admin_inbox = "<owner inbox id>"  # ...and for which inbox: woken in its DM with this one (a member of "me")
 # admin_turns_per_inbox_per_day = 15 # its own per-person number (default: [admin_turn] per_inbox_per_day)
 #
 # [profiles.friends]

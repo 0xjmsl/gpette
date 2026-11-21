@@ -173,12 +173,12 @@ check("a file is still its own turn, the fire after it", got == [["photo.jpg"], 
 cc = ChatController.__new__(ChatController)
 text = cc._waiting_text([user("d", "are you there"), wake("d", "wake 1")], [user("d", "are you there")])
 check("the fire's text lists what was waiting, in order", "are you there\nwake 1" in text, text)
-check("and says a person must be answered", "[NO_REPLY] does not apply" in text, text)
-check("wake-ups alone leave [NO_REPLY] open", "does not apply" not in cc._waiting_text([wake("d")], []))
+check("and says a person is waiting for an answer", "A person wrote" in text, text)
+check("wake-ups alone add no such line", "A person wrote" not in cc._waiting_text([wake("d")], []))
 cc._resolve_sender_name = lambda inbox: ({"alice": "Alice"}.get(inbox), "test")
 text = cc._waiting_text([user("g", "hi all", "alice"), wake("g", "wake 1")], [], True)
-check("in a group each waiting line carries its sender, and [NO_REPLY] stays open",
-      "Alice: hi all\nwake 1" in text and "does not apply" not in text, text)
+check("in a group each waiting line carries its sender",
+      "Alice: hi all\nwake 1" in text and "A person wrote" not in text, text)
 alone = []
 cc.thread_controller = tc
 cc.receive_Message_ChatController = lambda m: alone.append(m) or "handled"

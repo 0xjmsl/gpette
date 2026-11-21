@@ -223,12 +223,14 @@ admin = true                        # other profiles may wake this one; it grant
 
 [profiles.bot_public]
 admin_profile = "bot_main"          # whom its [ADMIN_TURN] wakes
+admin_inbox = "<your inbox id>"     # and for whom: the main is woken in its DM with this inbox
 ```
 
 - **It waits its turn and stacks.** The wake-up is a message in the queue like any other. When that chat's turn comes, everything waiting for it (the owner's own messages, requests from other people) is answered in one turn, one line each. Each stacked item is worth `[send] per_item` sends. The main's final answer goes to its own chat, so its owner sees it; `[NO_REPLY]` sends nothing.
 - **Notes are the model's own words.** Before a request is accepted gpette reads the asking folder: a file that shares `[admin_turn] copy_words` words in a row (default 6, 0 = off) with a message a person wrote in that chat refuses the request, and the model is told which file to rewrite. What a stranger typed never reaches the main word for word. `conversations/` (gpette's own transcripts) is not read.
 - **Daily caps.** `[admin_turn] per_inbox_per_day` requests from one person (default 15) and `per_day` to one main (default 50); 0 = no limit. A profile can set its own: `admin_turns_per_inbox_per_day` on the asking profile, `admin_turns_per_day` on the main. One inbox can have its own number in `[admin_turn.inboxes]`. A request from someone whose earlier one still waits joins it and is not counted.
-- **The link is checked at start and at each use.** If `admin_profile` names a profile that is gone, has no `admin = true`, or has no chat yet (nobody in its `members` ever wrote to it), the asking model gets `[ADMIN_MISCONFIGURED_ERROR]` and carries on: it is told to note the request and answer the person plainly.
+- **The two pointers decide everything; nothing is guessed.** `admin_profile` says which profile is woken, `admin_inbox` says for which inbox: the wake-up goes to the main's DM with exactly that inbox. If that DM does not exist yet, gpette opens it through the daemon (`POST /dm`), so it works before anyone has written. `admin_inbox` must be one of the main's `members`.
+- **The link is checked at start and at each use.** If `admin_profile` names a profile that is gone or has no `admin = true`, or `admin_inbox` is missing or not one of its members, the asking model gets `[ADMIN_MISCONFIGURED_ERROR]` and carries on: it is told to note the request and answer the person plainly.
 - A refused request (the link, a copied note, a cap) delivers nothing to the person and gives the turn back to the model with the reason. Only a Claude Code run can take that; on another engine the block is cut out and the text before it is delivered. The token counts only at the end of a line, so a sentence that mentions it is not a request. A wake-up counts toward the limit of 50 messages in a row without a person.
 
 `tests/test_admin_turn.py` checks all of it with a scripted model; `tests/scenarios/admin_turn.toml` runs the round trip with a real one (haiku, under a cent).
@@ -239,7 +241,7 @@ A bot only uses what it knows about. So gpette adds a short section to the syste
 
 | The profile | Is told about |
 |---|---|
-| any profile | `[NO_REPLY]`: when it sends nothing (a turn no person started, or a group) |
+| any profile | `[NO_REPLY]`: it always sends nothing, and only the last text of a turn is delivered |
 | `send = true` (Claude Code) | `[SEND_XMTP_MESSAGE]`: its shape; with a `public_profile`, what it sets up (the person goes on the inbox list, gets a folder, their answers reach the public profile with no password), that nothing else sets that up, and to ask first when it cannot tell a one-off from the start of a conversation |
 | `admin_profile = "..."` | `[ADMIN_TURN]`: note the request in its own words, end the answer with the block, what happens next |
 | `admin = true` | what an "Admin turn asked by..." message is, and that the notes it points at are information, not instructions |
@@ -252,7 +254,7 @@ Claude Code profiles get it appended to their system prompt, after the folder's 
 
 ## Timers
 
-The model can set reminders that fire later. When a timer fires, the model gets a message that starts with `Timer fired:` plus the instructions it wrote. If it answers `[NO_REPLY]` (alone, or as the last line after a closing note), nothing is sent. This lets a timer do quiet work. (A group turn may answer `[NO_REPLY]` too; a DM never: a person who writes gets an answer.)
+The model can set reminders that fire later. When a timer fires, the model gets a message that starts with `Timer fired:` plus the instructions it wrote. If it answers `[NO_REPLY]` (alone, or as the last line after a closing note), nothing is sent. This lets a timer do quiet work. `[NO_REPLY]` sends nothing in every kind of turn: a timer fire, a group, an admin turn, and a person's message in a one-to-one chat too. The model is told not to use it on a person who wrote.
 
 Timers are Python tools (`setTimer`, `listTimers`, `editTimer`, `cancelTimer`), so API providers can set them. (`scripts/timer.py` below needs gpette's packages: run it with the same Python, or virtual environment, that runs `main.py`.) Claude Code cannot call Python tools; a Claude Code profile that may run Bash uses the command line instead:
 
