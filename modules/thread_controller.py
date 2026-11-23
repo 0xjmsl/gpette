@@ -8,6 +8,7 @@ import logging
 from models.conversation_db import ConversationDB
 from modules.thread_joins import get_group
 from modules import transcripts, send_block, admin_turn
+from modules import a2ui_block
 
 from utils.message_logger import log_message_flow, truncate_message
 
@@ -146,6 +147,8 @@ class ThreadController:
                 and message.get('source', 'SocketIO') in ('SocketIO', admin_turn.SOURCE)
                 and message.get('contentType') != 'readReceipt'):
             send_block.start_turn(conversation_id, stacked or 1)
+        if message.get('role') in ('Proactive', 'user'):
+            a2ui_block.start_turn(conversation_id)                  # failed <a2ui> blocks count per turn
         for m in (message.get('batch') or [message]):
             admin_turn.done(m)              # its turn begins: the same person may ask again
 
@@ -180,7 +183,8 @@ class ThreadController:
         for handler_name, handler in self.handlers.items():
             if handler_name != message_source:  # Skip if handler name matches message source
                 if handler_name == 'SocketIO' and message_source in (
-                        'FunctionRegistry', send_block.SOURCE, admin_turn.SOURCE, admin_turn.RESULT_SOURCE):
+                        'FunctionRegistry', send_block.SOURCE, a2ui_block.SOURCE,
+                        admin_turn.SOURCE, admin_turn.RESULT_SOURCE):
                     continue        # a tool result or a wake-up is for the model, never for the chat
 
                 if message.get('role') == 'Proactive' and handler_name == 'SocketIO':
@@ -232,6 +236,7 @@ class ThreadController:
 
         # Reset the continuous message counter for this conversation
         self.conversation_message_counters[conversation_id] = 0
+        a2ui_block.forget(conversation_id)
 
         # Create reset confirmation message
         reset_message = {

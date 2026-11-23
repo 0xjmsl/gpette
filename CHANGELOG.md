@@ -2,6 +2,14 @@
 
 Newest first. gpette has no version numbers yet: entries are dated, and `main` is what runs.
 
+## 2026-11-23
+
+> **Experimental**, and off until a profile asks for it.
+
+### New
+
+- **Interfaces the app draws: `<a2ui>`.** A profile with `a2ui = true` can answer with buttons, a form or a list, written as an [A2UI](https://a2ui.org) block and drawn by the person's app. The A2UI agent SDK (`pip install a2ui-agent-sdk`, optional) writes the lesson the model reads, turns the block into A2UI messages and checks them; a block that fails goes back to the model with the reason. A button press comes back as a message that starts `[A2UI action]`. Needs an xmtp_daemon that knows the `a2ui` content type. README: Interfaces the app draws. Tests: `tests/test_a2ui_block.py`.
+
 ## 2026-11-20
 
 > **Experimental.** Everything in this entry is new and has run for hours, not weeks. It is in use on two real setups and covered by the tests named below, but expect the details to move. If you only want a bot that answers, none of it turns on by itself: every feature here is off until your config asks for it. Read "Changes to check in your config" before you update.

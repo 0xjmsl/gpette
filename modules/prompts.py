@@ -7,6 +7,8 @@ in its working folder.
 """
 from datetime import datetime
 
+from modules import a2ui_block
+
 
 def default_system_prompt() -> str:
     now = datetime.now().strftime("%A, %B %d, %Y at %H:%M")
@@ -63,6 +65,8 @@ def blocks_note(profile, claude_code=True) -> str:
                 "conversation with a public folder for this person, ask before sending, so you "
                 "can pick the right way.")
         parts.append(text)
+    if getattr(profile, 'a2ui', False) and a2ui_block.available()[0]:
+        parts.append(a2ui_block.note())
     if getattr(profile, 'admin_profile', ''):
         parts.append(
             "[ADMIN_TURN]: you cannot act outside this chat. When the person needs something only "

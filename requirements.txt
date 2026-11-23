@@ -12,3 +12,5 @@ openai               # provider "openai"
 google-genai         # provider "gemini"
 ollama               # provider "ollama"
 # Provider "claude-code" needs the Claude Code CLI ("claude") on PATH.
+# Optional, for profiles with a2ui = true (interfaces the person's app draws):
+# a2ui-agent-sdk

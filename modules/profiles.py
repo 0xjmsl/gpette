@@ -63,6 +63,9 @@ Every profile key is optional and falls back to the top-level value:
     send                true = this profile may write to other inboxes and registered groups
                         with [SEND_XMTP_MESSAGE] (modules/send_block.py). Off unless written;
                         Claude Code profiles only
+    a2ui                true = this profile may answer with an interface the person's app
+                        draws (an <a2ui> block, modules/a2ui_block.py). Private chats only;
+                        needs `pip install a2ui-agent-sdk`. Off unless written
     menu                true = /menu (model, timers, session, status) and full error text.
                         (Until `menu` is written, `admin = true` still turns it on.)
     on_error            describe | generic (default: describe with the menu, else generic)
@@ -109,6 +112,7 @@ class Profile:
     admin_profile: str = ''               # the profile this one's [ADMIN_TURN] wakes ('' = none)
     menu: bool = False                    # /menu, and errors described in full (modules/admin_menu.py)
     send: bool = False                    # may use [SEND_XMTP_MESSAGE] (modules/send_block.py)
+    a2ui: bool = False                    # may answer with an <a2ui> block (modules/a2ui_block.py)
     per_inbox: bool = False               # workdir is a parent: one subfolder per person (their inbox id)
     folder_key: str = ''                  # per_inbox: whose subfolder this run uses
     knowledge: str = ''                   # a folder every run may also read (--add-dir)
@@ -281,6 +285,7 @@ def _from_config(name, raw):
         p.admin = bool(raw['admin'])
     p.admin_profile = str(raw.get('admin_profile') or '').strip()
     p.send = bool(raw.get('send'))
+    p.a2ui = bool(raw.get('a2ui'))
     p.per_inbox = bool(raw.get('per_inbox'))
     p.knowledge = str(raw.get('knowledge') or '').strip()
     p.public_profile = str(raw.get('public_profile') or '').strip()

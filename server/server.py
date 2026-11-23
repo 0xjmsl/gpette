@@ -7,7 +7,7 @@ from modules.gates import get_gate, invalidate_conversation as invalidate_gate_c
 from modules.profiles import resolve_profile
 from modules import filter as message_filter
 from modules import routes as route_log
-from modules import admin_menu
+from modules import admin_menu, a2ui_block
 from modules.proactive_system import ProactiveSystem
 from .routes.routes import bp as xmtp_routes
 from .routes.admin import bp as admin_routes
@@ -76,6 +76,19 @@ def create_server(config_class):
     thread_controller.register_handler("ChatController", chat_controller.receive_Message_ChatController)
     thread_controller.register_handler("SocketIO", sendMessage)
     thread_controller.start()
+
+    # Profiles with a2ui = true: the lesson their runs read is written from the
+    # installed A2UI agent SDK (modules/a2ui_block.py).
+    if any(isinstance(p, dict) and p.get('a2ui') for p in (config_class.PROFILES or {}).values()):
+        ok, why = a2ui_block.available()
+        if ok:
+            try:
+                logging.info(f"a2ui: lesson written to {a2ui_block.write_skill()}")
+            except Exception:
+                logging.exception("a2ui: could not write the lesson file")
+        else:
+            logging.error(f"a2ui = true on a profile, but the A2UI agent SDK did not load ({why}). "
+                          f"Install it: pip install a2ui-agent-sdk. Until then <a2ui> blocks are cut out.")
 
     # Store thread controller and chat controller in app config so routes can access them
     server.config['THREAD_CONTROLLER'] = thread_controller
@@ -211,6 +224,20 @@ def create_server(config_class):
             return
 
         # auth_result['action'] == 'allow' - continue with normal flow
+
+        # What the person did on an interface we sent (modules/a2ui_block.py): a
+        # button press arrives as an `a2ui` message from their app. It becomes
+        # text for the model. On a profile without a2ui, or in a group, it is
+        # dropped: it is not something a person typed.
+        if standardized_message.get('contentType') == 'a2ui':
+            text = ''
+            if getattr(profile, 'a2ui', False) and standardized_message.get('kind') != 'group':
+                text = a2ui_block.incoming_text(standardized_message.get('a2ui'))
+            if not text:
+                logging.info("a2ui message with nothing for this profile, ignored")
+                return
+            standardized_message['contentType'] = 'text'
+            standardized_message['content'] = {'type': 'text', 'value': text}
 
         # /menu and its buttons (admin profiles only), answered before the model
         # so they work while it is over its limit. A button press (intent) on a
@@ -413,6 +440,9 @@ def standardize_message(data):
     # A button press on a menu (xmtp_daemon `intent`): {id, actionId, metadata?}
     if data.get('intent'):
         standardized_message['intent'] = data['intent']
+    # What a person did on an interface (xmtp_daemon `a2ui`): {messages: [...]}
+    if isinstance(data.get('a2ui'), dict):
+        standardized_message['a2ui'] = data['a2ui']
 
     # Extract metadata for attachments
     if data.get('contentType') and 'attachment' in data.get('contentType'):
@@ -503,6 +533,17 @@ def sendMessage(data: dict):
             "conversationId": conversation_id,
             "contentType": "actions",
             "actions": data.get("actions"),
+        })
+        return
+
+    # An interface the person's app draws (modules/a2ui_block.py), passed through as is.
+    if data.get("contentType") == "a2ui":
+        logging.info(f"Sending a2ui message to conversation: {conversation_id}")
+        _emit_outgoing({
+            "conversationId": conversation_id,
+            "contentType": "a2ui",
+            "a2ui": data.get("a2ui"),
+            "fallback": data.get("fallback") or "",
         })
         return
 

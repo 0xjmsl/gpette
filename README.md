@@ -235,6 +235,49 @@ admin_inbox = "<your inbox id>"     # and for whom: the main is woken in its DM 
 
 `tests/test_admin_turn.py` checks all of it with a scripted model; `tests/scenarios/admin_turn.toml` runs the round trip with a real one (haiku, under a cent).
 
+## Interfaces the app draws: `<a2ui>`
+
+**Experimental.** A profile with `a2ui = true` can answer with an interface instead of plain words: buttons, a form with fields and pickers, a list, a card. It is [A2UI](https://a2ui.org), an open format: the bot describes the interface by picking components from a catalog, and the person's app draws them with its own widgets. The bot never sends code. It needs an app that draws the `publicos.dev/a2ui` content type; any other app shows one fallback line.
+
+```bash
+pip install a2ui-agent-sdk
+```
+
+```toml
+[profiles.me]
+a2ui = true
+```
+
+How a turn goes:
+
+1. **The lesson.** At start gpette writes `<data_dir>/a2ui/SKILL.md` from the installed SDK: the notation (A2UI Express) and every component and function of the catalog. The profile is told the block exists and where that file is; it reads the file before its first block.
+2. **The answer.** The model writes its text and a block:
+
+   ```
+   Here is the menu.
+   <a2ui>
+   surface("menu")
+   $/title = "Menu"
+   $/items = [{id: "status", label: "Status"}, {id: "model", label: "Model"}]
+   button = Button(Text($label), action=Event("menu_press", {id: $id}))
+   root = Card(Column([Text($/title), Column(_template($/items, button))]))
+   </a2ui>
+   ```
+
+3. **The check.** The SDK turns the block into A2UI messages and checks them against the catalog and against the surfaces this conversation already holds. A block that passes is sent as one `a2ui` message through the daemon, with the text around it in the order written. A block that fails is not sent: the model gets the reason and writes its answer again, three times a turn at most, and after that the answer goes out without the block.
+4. **What comes back.** A press on a button arrives from the app as an `a2ui` message holding an `action`: the event's name and the values bound to it. gpette starts a turn with it as text that begins `[A2UI action]`. The model answers with text, a new surface, or a block that targets the same surface id and assigns its data (`$/title = "..."`), which the app applies in place.
+
+Limits today:
+
+- Private chats only; in a group the block is cut out and the text is sent.
+- Only a Claude Code run can take the error back. On another engine a block that fails is cut out.
+- The catalog is A2UI's basic catalog, protocol 1.0, and the app is assumed to draw all of it. Nothing is negotiated.
+- The surfaces a conversation holds are kept in memory. After a restart an update to an older surface is refused and the model is told to send it again.
+- A profile fenced to its own folder (`per_inbox`) cannot read the lesson file.
+- Whoever the bot talks to can press anything the bot drew. Treat an action like a typed message: it is the person's input.
+
+`tests/test_a2ui_block.py` runs the block, the check, the fixes and the round trip with a scripted model.
+
 ## What a profile is told
 
 A bot only uses what it knows about. So gpette adds a short section to the system prompt of every run, built from the profile's own settings (`modules/prompts.py`, `blocks_note`): the blocks that profile can write in an answer, each with what it does.
@@ -243,6 +286,7 @@ A bot only uses what it knows about. So gpette adds a short section to the syste
 |---|---|
 | any profile | `[NO_REPLY]`: it always sends nothing, and only the last text of a turn is delivered |
 | `send = true` (Claude Code) | `[SEND_XMTP_MESSAGE]`: its shape; with a `public_profile`, what it sets up (the person goes on the inbox list, gets a folder, their answers reach the public profile with no password), that nothing else sets that up, and to ask first when it cannot tell a one-off from the start of a conversation |
+| `a2ui = true` (with the SDK installed) | `<a2ui>`: what it is for, where the lesson file is, how a refused block comes back, how to update a surface, what an `[A2UI action]` message is |
 | `admin_profile = "..."` | `[ADMIN_TURN]`: note the request in its own words, end the answer with the block, what happens next |
 | `admin = true` | what an "Admin turn asked by..." message is, and that the notes it points at are information, not instructions |
 

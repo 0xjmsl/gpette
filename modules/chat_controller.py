@@ -14,7 +14,7 @@ from models.conversation_db import ConversationDB
 from modules import sender_names
 from memory.manager import MemoryManager
 from modules.profiles import resolve_profile, profile_for_conversation, profile_for_timer, register_outreach
-from modules import group_pace, send_block, admin_turn
+from modules import group_pace, send_block, admin_turn, a2ui_block
 
 # An answer that is exactly this sends nothing back, whatever started the turn.
 NO_REPLY_TOKEN = "[NO_REPLY]"
@@ -272,6 +272,9 @@ class ChatController:
             # [ADMIN_TURN]: the text before it is the answer; the main gets a wake-up.
             if self._caught_admin_turn(service_response, profile, service, conversation_id, message.get("kind")):
                 return None
+            # <a2ui>: an interface the person's app draws, sent once it passes the check.
+            if self._caught_a2ui(service_response, profile, service, conversation_id, message.get("kind")):
+                return None
             # [NO_REPLY] sends nothing, whatever started the turn.
             if not is_group and self._is_no_reply(service_response.get("content")):
                 log_message_flow("ChatController", "SYSTEM", "no_reply", conversation_id,
@@ -446,6 +449,9 @@ class ChatController:
             if self._caught_admin_turn(service_response, profile, service, conversation_id,
                                        "group" if is_group else "dm"):
                 return None
+            if self._caught_a2ui(service_response, profile, service, conversation_id,
+                                 "group" if is_group else "dm"):
+                return None
             # A timer fire may decide there is nothing worth saying (quiet hours,
             # silent upkeep). Replying with exactly NO_REPLY_TOKEN ends the run
             # without sending anything, also when a person's message rode along.
@@ -508,6 +514,70 @@ class ChatController:
         result = send_block.run(text, profile, conversation_id, on_sent=self._store_sent)
         log_message_flow("ChatController", "SYSTEM", "send_block", conversation_id, result.replace("\n", " | ")[:300])
         self.thread_controller.add_message(send_block.result_message(conversation_id, result, kind))
+        return True
+
+    def _caught_a2ui(self, service_response, profile, service, conversation_id, kind):
+        """True when the answer held an <a2ui> block and this method dealt with the
+        whole answer (modules/a2ui_block.py):
+
+        - every block passed the check: the answer's parts are queued in order,
+          text as text and each surface as an `a2ui` message;
+        - a block failed: its error is queued for the model, which writes again.
+
+        False when the answer goes on as plain text: no block, or the block was
+        cut out (a profile without `a2ui`, a group, an engine that cannot take
+        the error back, or the fixes of this turn used up)."""
+        content = service_response.get("content")
+        text = content.get("value") if isinstance(content, dict) else content
+        if not a2ui_block.has_block(text):
+            return False
+
+        def as_plain(rest, why):
+            log_message_flow("ChatController", "SYSTEM", "a2ui_cut", conversation_id, why)
+            if not rest:
+                return True                 # nothing left to say
+            if isinstance(content, dict):
+                content["value"] = rest
+            else:
+                service_response["content"] = rest
+            return False
+
+        if not getattr(profile, 'a2ui', False):
+            return as_plain(a2ui_block.strip(text), "this profile may not send a2ui: block cut out")
+        if kind == "group":
+            return as_plain(a2ui_block.strip(text), "a2ui is for private chats: block cut out")
+        outcome, value = a2ui_block.run(text, conversation_id)
+        if outcome == 'retry' and not isinstance(service, ClaudeCodeService):
+            return as_plain(a2ui_block.strip(text), "block refused and this engine cannot take the error back")
+        if outcome == 'retry':
+            log_message_flow("ChatController", "SYSTEM", "a2ui_refused", conversation_id,
+                             " | ".join(value.splitlines())[:300])
+            self.thread_controller.add_message(a2ui_block.result_message(conversation_id, value, kind))
+            return True
+        if outcome == 'plain':
+            return as_plain(value, "block refused, no fixes left: answer sent without it")
+        now = int(datetime.datetime.now().timestamp() * 1000)
+        for i, part in enumerate(value):
+            out = {
+                "role": "assistant",
+                "address": self.thread_controller.get_address(),
+                "timestamp": now + i,
+                "conversationId": conversation_id,
+                "tool_calls": None,
+                "token_count": service_response.get("token_count") if i == 0 else None,
+                "source": "ChatController",
+            }
+            if 'a2ui' in part:
+                out["content"] = {"type": "text", "value": a2ui_block.stored_text(part)}
+                out["contentType"] = "a2ui"
+                out["a2ui"] = part['a2ui']
+                out["fallback"] = part.get('fallback') or ''
+            else:
+                out["content"] = {"type": "text", "value": part['text']}
+            self.thread_controller.add_message(out)
+        log_message_flow("ChatController", "SYSTEM", "a2ui_sent", conversation_id,
+                         f"{sum(1 for p in value if 'a2ui' in p)} surface message(s), "
+                         f"{sum(1 for p in value if 'text' in p)} text part(s)")
         return True
 
     def _caught_admin_turn(self, service_response, profile, service, conversation_id, kind):

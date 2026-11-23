@@ -64,6 +64,9 @@ default = "answer"                   # who this gpette answers when no rule matc
 # accounts = ["0x<account>"]         # needs [sessions] owner_resolver
 # groups = ["<group conversation id>"]   # a group chat, by its id
 
+# a2ui = true on a profile lets it answer with an interface the person's app draws
+# (buttons, forms, lists; README: Interfaces the app draws). Needs: pip install a2ui-agent-sdk
+
 [send]                               # [SEND_XMTP_MESSAGE], for profiles with send = true
 per_item = 3                         # sends a turn gets for each timer fire or stacked message
 max_per_turn = 15                    # never more than this in one turn
