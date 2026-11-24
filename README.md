@@ -72,6 +72,8 @@ A profile gives some people or groups their own environment: provider, model, fo
 
 A DM is matched by its sender's inbox id. A group is matched by its own id only, never by who writes in it: a group gets a profile when you list its id in `members`, so the owner speaking in some other group does not bring the owner's folder and tools there. Anything unmatched uses the top-level settings. Every key is optional. See the end of `gpette.example.toml` for the full list.
 
+`privacy` (on by default) makes a bot refuse to reveal file paths, user names and machine or config details. Set `privacy = false` only on a profile that answers just its owner, who may be told where their own files are; with it on, a private assistant refuses its own user.
+
 With [several inboxes](#several-inboxes), `inbox = "<name>"` binds a profile to one of them: it answers only what arrives at that inbox, and speaks through it.
 
 ## Several inboxes
