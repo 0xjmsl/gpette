@@ -200,6 +200,31 @@ nothing_matched = "bot_public"
 
 `tests/test_public_profiles.py` checks the rules; `tests/scenarios/public_profile.toml` checks the fence with a real model (haiku, a few cents): a note written and read back, the knowledge folder read and not written, the next person's folder neither read nor written.
 
+## Reactions and replies: message tags
+
+Every message a bot receives starts with a short tag, `m:` plus the first six hex characters of its XMTP id (`modules/msg_tags.py`):
+
+```
+[m:3fa9c1] how's it going?
+[m:7b20aa, reply to m:3fa9c1 "how's it going?"] fine, you?
+[m:9c01de] [reaction 🫡 added to m:3fa9c1 "how's it going?"]
+```
+
+A reaction arrives as a line of text and starts a turn like a message; the model may answer `[NO_REPLY]`. With a tag the model can point at a message:
+
+- **React or reply mid-turn** (a `send = true` profile): the `[SEND_XMTP_MESSAGE]` block takes `TO: <tag>` with `MESSAGE:` (a reply) or with `REACTION: <emoji>` (alone, nothing else). Both are sent and the turn comes back with the result. A reaction never ends a turn: when it is the whole answer, the model sends it this way and ends with `[NO_REPLY]`.
+- **End the turn with a reply** (any profile): the answer is the block
+
+  ```
+  [REPLY]
+  {TO: m:3fa9c1,
+  MESSAGE: the answer}
+  ```
+
+  and it is delivered as a reply to that message (`modules/reply_block.py`). A tag that does not resolve delivers the text as a plain message, so an answer is never lost.
+
+A tag only resolves in the chat it came from. Tags are kept in memory, the last 500 messages per chat; after a restart older ones no longer resolve and the model is told so. Needs an xmtp_daemon with reactions and replies. `tests/test_msg_tags.py`.
+
 ## Asking the main: `[ADMIN_TURN]`
 
 A public profile talks to people and holds no power. When something needs the profile that does, its model ends the answer with the block:
@@ -302,8 +327,8 @@ A bot only uses what it knows about. So gpette adds a short section to the syste
 
 | The profile | Is told about |
 |---|---|
-| any profile | `[NO_REPLY]`: it always sends nothing, and only the last text of a turn is delivered |
-| `send = true` (Claude Code) | `[SEND_XMTP_MESSAGE]`: its shape; with a `public_profile`, what it sets up (the person goes on the inbox list, gets a folder, their answers reach the public profile with no password), that nothing else sets that up, and to ask first when it cannot tell a one-off from the start of a conversation |
+| any profile | `[NO_REPLY]`: it always sends nothing, and only the last text of a turn is delivered; message tags and the `[REPLY]` block |
+| `send = true` (Claude Code) | `[SEND_XMTP_MESSAGE]`: its shape, and its reply and reaction kinds (`TO:`); with a `public_profile`, what it sets up (the person goes on the inbox list, gets a folder, their answers reach the public profile with no password), that nothing else sets that up, and to ask first when it cannot tell a one-off from the start of a conversation |
 | `a2ui = true` (with the SDK installed) | `<a2ui>`: what it is for, where the lesson file is, how a refused block comes back, how to update a surface, what an `[A2UI action]` message is |
 | `admin_profile = "..."` | `[ADMIN_TURN]`: note the request in its own words, end the answer with the block, what happens next |
 | `admin = true` | what an "Admin turn asked by..." message is, and that the notes it points at are information, not instructions |

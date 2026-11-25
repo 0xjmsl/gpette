@@ -45,6 +45,12 @@ def blocks_note(profile, claude_code=True) -> str:
         "and gets [NO_REPLY] gets silence, so do not use it on them. Only the last text of a "
         "turn is delivered: text you wrote earlier in the same turn is not, so if the turn "
         "goes on after your answer, your last text must be that answer again, not [NO_REPLY].",
+        "Message tags: each message you receive starts with its tag, like [m:3fa9c1]; a reply "
+        "says what it answers ([m:7b20aa, reply to m:3fa9c1 \"...\"]) and a reaction arrives as "
+        "a line ([reaction 🫡 added to m:3fa9c1 \"...\"]). A reaction needs no answer unless "
+        "you have something to say. [REPLY]: to answer one message in particular, end your turn "
+        "with this block and nothing else:\n[REPLY]\n{TO: <message tag>,\nMESSAGE: <the text>}\n"
+        "It is delivered as a reply to that message. A tag only works in the chat it came from.",
     ]
     if getattr(profile, 'send', False) and claude_code:
         public = getattr(profile, 'public_profile', '') or ''
@@ -52,7 +58,11 @@ def blocks_note(profile, claude_code=True) -> str:
             "[SEND_XMTP_MESSAGE]: starts a conversation with someone. Answer with this block and "
             "nothing else:\n[SEND_XMTP_MESSAGE]\n{INBOXID: <their inbox id>,\nMESSAGE: <the text>}\n"
             "(GROUPID: instead of INBOXID: writes to a registered group.) The message is sent and "
-            "you get the result back, so you can carry on; one block per answer.")
+            "you get the result back, so you can carry on; one block per answer. Two more kinds, "
+            "same block, for a message in that chat: a reply, {INBOXID: <id>,\nTO: <message tag>,\n"
+            "MESSAGE: <the text>}; a reaction, {INBOXID: <id>,\nTO: <message tag>,\nREACTION: <one "
+            "emoji>}, alone, with nothing else. A reaction never ends a turn: when a reaction is "
+            "the whole answer, send it this way, then end with [NO_REPLY].")
         if public:
             text += (
                 " What it sets up: the first time you write to an inbox this way, that person is "

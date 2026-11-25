@@ -14,7 +14,7 @@ from models.conversation_db import ConversationDB
 from modules import sender_names
 from memory.manager import MemoryManager
 from modules.profiles import resolve_profile, profile_for_conversation, profile_for_timer, register_outreach
-from modules import group_pace, send_block, admin_turn, a2ui_block
+from modules import group_pace, send_block, admin_turn, a2ui_block, msg_tags, reply_block
 
 # An answer that is exactly this sends nothing back, whatever started the turn.
 NO_REPLY_TOKEN = "[NO_REPLY]"
@@ -296,6 +296,8 @@ class ChatController:
                 "token_count": service_response.get("token_count"),
                 "source": "ChatController"
             }
+            # [REPLY]: the answer goes out as a reply to one tagged message.
+            self._apply_reply_block(final_response, conversation_id)
 
             # Memory indexing — store this interaction for future recall
             if self._memory:
@@ -515,6 +517,26 @@ class ChatController:
         log_message_flow("ChatController", "SYSTEM", "send_block", conversation_id, result.replace("\n", " | ")[:300])
         self.thread_controller.add_message(send_block.result_message(conversation_id, result, kind))
         return True
+
+    def _apply_reply_block(self, final_response, conversation_id):
+        """An answer that is a [REPLY] block (modules/reply_block.py) becomes a reply
+        message; a tag that does not resolve leaves the text as a plain message."""
+        content = final_response.get("content")
+        text = content.get("value") if isinstance(content, dict) else content
+        if not reply_block.has_block(text):
+            return
+        parsed = reply_block.parse(text)
+        reference, why = (None, parsed.get('error'))
+        if not why:
+            reference, why = msg_tags.resolve(conversation_id, parsed['to'])
+        message = parsed.get('message') or ''
+        final_response["content"] = {"type": "text", "value": message}
+        if why:
+            log_message_flow("ChatController", "SYSTEM", "reply_block_plain", conversation_id,
+                             f"{why}: delivered as a plain message")
+            return
+        final_response["contentType"] = "reply"
+        final_response["reference"] = reference
 
     def _caught_a2ui(self, service_response, profile, service, conversation_id, kind):
         """True when the answer held an <a2ui> block and this method dealt with the

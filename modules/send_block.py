@@ -50,6 +50,8 @@ _TOKEN_RE = re.compile(r"^[ \t>*`]*\[\s*SEND[_ ]XMTP[_ ]MESSAGE\s*\][ \t*`]*$",
 _TARGET_RE = re.compile(r"""^\s*["']?(INBOX_?ID|GROUP_?ID)["']?\s*:\s*["']?([^\s"',}]+)["']?\s*,?\s*""",
                         re.IGNORECASE)
 _MESSAGE_RE = re.compile(r"""^\s*["']?MESSAGE["']?\s*:\s*""", re.IGNORECASE)
+_TO_RE = re.compile(r"""^\s*["']?TO["']?\s*:\s*["']?([^\s"',}]+)["']?\s*,?\s*""", re.IGNORECASE)
+_REACTION_RE = re.compile(r"""^\s*["']?REACTION["']?\s*:\s*""", re.IGNORECASE)
 _INBOX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _lock = threading.Lock()
@@ -71,13 +73,36 @@ def _from_json(body):
         return None
     low = {str(k).strip().lower().replace('_', ''): v for k, v in data.items()}
     message = low.get('message')
-    if not isinstance(message, str):
+    reaction = low.get('reaction')
+    if not isinstance(message, str) and not isinstance(reaction, str):
         return None
     if isinstance(low.get('inboxid'), str):
-        return {'kind': 'inbox', 'target': low['inboxid'].strip(), 'message': message.strip()}
-    if isinstance(low.get('groupid'), str):
-        return {'kind': 'group', 'target': low['groupid'].strip(), 'message': message.strip()}
-    return None
+        out = {'kind': 'inbox', 'target': low['inboxid'].strip()}
+    elif isinstance(low.get('groupid'), str):
+        out = {'kind': 'group', 'target': low['groupid'].strip()}
+    else:
+        return None
+    if isinstance(low.get('to'), str) and low['to'].strip():
+        out['to'] = low['to'].strip()
+    if isinstance(reaction, str):
+        out['reaction'] = reaction.strip()
+    else:
+        out['message'] = message.strip()
+    return _checked(out)
+
+
+def _checked(block):
+    """A reaction needs TO: and nothing else; a message needs text."""
+    if 'reaction' in block:
+        if not block.get('to'):
+            return {'error': 'a REACTION needs TO: <message tag>'}
+        if not block['reaction']:
+            return {'error': 'the REACTION is empty'}
+        if 'message' in block:
+            return {'error': 'a reaction goes alone: REACTION or MESSAGE, not both'}
+    elif not block.get('message'):
+        return {'error': 'the MESSAGE is empty'}
+    return block
 
 
 def _one(chunk):
@@ -94,16 +119,28 @@ def _one(chunk):
     if not m:
         return {'error': 'the block needs INBOXID: or GROUPID: first'}
     kind = 'group' if m.group(1).upper().startswith('GROUP') else 'inbox'
+    block = {'kind': kind, 'target': m.group(2).strip()}
     rest = inner[m.end():]
+    mt = _TO_RE.match(rest)
+    if mt:
+        block['to'] = mt.group(1).strip()
+        rest = rest[mt.end():]
+
+    def unquote(s):
+        s = s.strip().rstrip(',').strip()
+        if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+            s = s[1:-1].strip()
+        return s
+
+    mr = _REACTION_RE.match(rest)
+    if mr:
+        block['reaction'] = unquote(rest[mr.end():])
+        return _checked(block)
     mm = _MESSAGE_RE.match(rest)
     if not mm:
-        return {'error': 'the block needs MESSAGE: after the id'}
-    message = rest[mm.end():].strip()
-    if len(message) >= 2 and message[0] == message[-1] and message[0] in "\"'":
-        message = message[1:-1].strip()
-    if not message:
-        return {'error': 'the MESSAGE is empty'}
-    return {'kind': kind, 'target': m.group(2).strip(), 'message': message}
+        return {'error': 'the block needs MESSAGE: (or TO: + REACTION:) after the id'}
+    block['message'] = unquote(rest[mm.end():])
+    return _checked(block)
 
 
 def parse(text):
@@ -199,9 +236,25 @@ def _send_one(block, profile, turn_conversation, call):
             return None, "that group is not registered (its id is in no profile's members)"
         conversation = inboxes.group_key(group, inbox_name) if inbox_name else group
         xmtp_conversation = group
-    data, why = call(url, '/send', {'conversationId': xmtp_conversation, 'content': block['message']})
+    body = {'conversationId': xmtp_conversation, 'content': block.get('message', '')}
+    if block.get('to'):
+        from modules import msg_tags
+        reference, why = msg_tags.resolve(xmtp_conversation, block['to'])
+        if why:
+            return None, why
+        body['reference'] = reference
+        if 'reaction' in block:
+            body.update(contentType='reaction', content=block['reaction'])
+            # what the chat's history keeps of it
+            block['message'] = f"(reaction {block['reaction']} to {msg_tags.describe(xmtp_conversation, reference)})"
+        else:
+            body['contentType'] = 'reply'
+    data, why = call(url, '/send', body)
     if why:
         return None, why
+    if body.get('contentType') != 'reaction':
+        from modules import msg_tags
+        msg_tags.remember(xmtp_conversation, (data or {}).get('id'), block.get('message', ''))
     return conversation, None
 
 
@@ -249,7 +302,8 @@ def run(text, profile, turn_conversation, call=None, on_sent=None):
                 extra = on_sent(conversation, block, profile) or ''
             except Exception:
                 logging.exception("send_block: on_sent failed (the message did leave)")
-        lines.append(f"Message sent to {what}. {(extra + ' ') if extra else ''}{_left_line(turn_conversation)}")
+        label = 'Reaction' if 'reaction' in block else ('Reply' if block.get('to') else 'Message')
+        lines.append(f"{label} sent to {what}. {(extra + ' ') if extra else ''}{_left_line(turn_conversation)}")
     return "[SEND_XMTP_MESSAGE result]\n" + "\n".join(lines)
 
 

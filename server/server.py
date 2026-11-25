@@ -359,6 +359,21 @@ def create_server(config_class):
                     "value": "Failed to process attachment"
                 }
         
+        # Tags (modules/msg_tags.py): the model sees `[m:3fa9c1] text`, a reply
+        # names what it answers, a reaction becomes a line of text, so it can
+        # react or reply to any message by its tag.
+        try:
+            from modules import msg_tags
+            c = standardized_message.get('content')
+            if (standardized_message.get('contentType') != 'readReceipt'
+                    and isinstance(c, dict) and isinstance(c.get('value'), str)):
+                c['value'] = msg_tags.incoming_line(
+                    standardized_message.get('conversationId'), standardized_message, c['value'])
+            if standardized_message.get('contentType') == 'reaction':
+                standardized_message['contentType'] = 'text'
+        except Exception:
+            logging.exception("msg_tags: tagging failed, message passed on untagged")
+
         # The raw gallery list (base64 bodies) stops here; extras are in content.
         standardized_message.pop('attachments', None)
         standardized_message['source'] = 'SocketIO'
@@ -444,6 +459,13 @@ def standardize_message(data):
         'members': data.get('members'),
     }
     
+    # The XMTP message id, and what it answers or reacts to (modules/msg_tags.py).
+    if data.get('id'):
+        standardized_message['id'] = data['id']
+    if data.get('replyTo'):
+        standardized_message['replyTo'] = data['replyTo']
+    if isinstance(data.get('reaction'), dict):
+        standardized_message['reaction'] = data['reaction']
     # A button press on a menu (xmtp_daemon `intent`): {id, actionId, metadata?}
     if data.get('intent'):
         standardized_message['intent'] = data['intent']
@@ -541,6 +563,23 @@ def sendMessage(data: dict):
             "contentType": "actions",
             "actions": data.get("actions"),
         })
+        return
+
+    # A reaction or a reply to an earlier message (modules/msg_tags.py): `reference`
+    # is the full XMTP id, already resolved from the model's tag.
+    if data.get("contentType") in ("reaction", "reply"):
+        content = data.get("content")
+        if isinstance(content, dict):
+            content = content.get("value")
+        out = {
+            "conversationId": conversation_id,
+            "contentType": data["contentType"],
+            "reference": data.get("reference"),
+            "content": content or "",
+        }
+        if data.get("action"):
+            out["action"] = data["action"]
+        _emit_outgoing(out)
         return
 
     # An interface the person's app draws (modules/a2ui_block.py), passed through as is.

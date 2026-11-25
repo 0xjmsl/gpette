@@ -108,6 +108,12 @@ def send_via_daemon(message, attempts=3):
             r = requests.post(url, json=message, timeout=60)
             if r.ok:
                 msg_id = r.json().get("id")
+                if message.get('contentType') in (None, '', 'text', 'reply'):
+                    try:
+                        from modules import msg_tags
+                        msg_tags.remember(message.get('conversationId'), msg_id, message.get('content'))
+                    except Exception:
+                        logging.exception("msg_tags: could not note a sent message")
                 logging.info(f"xmtp_http_bridge: sent to {message.get('conversationId')} "
                              f"({message.get('contentType') or 'text'}, id {str(msg_id)[:12]})")
                 return msg_id
