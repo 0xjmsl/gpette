@@ -33,12 +33,22 @@ Bounds:
 - Private chats only. In a group the block is cut out.
 - The check needs a result round trip, which only a Claude Code run can take.
   On another engine a block that fails is cut out.
-- The catalog is A2UI's basic catalog, protocol 1.0. The app is assumed to
-  draw all of it (there is no negotiation yet).
+- The catalog is A2UI's basic catalog, protocol 1.0, unless the profile names
+  another one: `a2ui_catalog = "<path to a catalog document>"` (the JSON file a
+  catalog is published as). A profile writes for one catalog. The lesson and
+  the check are then made from that document, and each catalog has its own
+  lesson file.
+- The app is assumed to draw all of the profile's catalog (there is no
+  negotiation yet), unless the profile says what the app draws:
+  `a2ui_draws = "<path to a JSON file>"`, holding
+  `{"components": ["Card", ...], "functions": ["formatDate", ...]}`. Either
+  list may be left out (= all of that kind). The lesson then teaches only
+  those, and a block that uses anything else is refused.
 
 The surfaces a conversation holds are kept in memory. After a restart an
 update to an older surface is refused, and the model is told to send it again.
 """
+import hashlib
 import json
 import logging
 import os
@@ -58,8 +68,8 @@ PROTOCOL = "1.0"
 _BLOCK_RE = re.compile(r"<a2ui>.*?(?:</a2ui>|\Z)", re.DOTALL)
 
 _lock = threading.Lock()
-_processor = None                         # the SDK's request processor, made once
-_states = {}                              # conversation id -> the SDK's RendererState
+_processors = {}                          # _key(spec) -> the SDK's request processor, made once
+_states = {}                              # conversation id -> (_key(spec), the SDK's RendererState)
 _fails = {}                               # conversation id -> failed blocks this turn
 
 
@@ -69,26 +79,79 @@ class Unavailable(Exception):
 
 # --- the SDK ---------------------------------------------------------------------------
 
-def _sdk():
-    """The request processor for the basic catalog. Raises Unavailable."""
-    global _processor
-    if _processor is not None:
-        return _processor
+def spec_of(profile):
+    """What a profile writes its blocks for: (its `a2ui_catalog`, its
+    `a2ui_draws`). Every function below that takes a `spec` takes this; the
+    empty one is the whole basic catalog."""
+    return (getattr(profile, 'a2ui_catalog', '') or '', getattr(profile, 'a2ui_draws', '') or '')
+
+
+def _key(spec):
+    """A spec with its two paths made absolute ('' stays ''): the key of its
+    processor. ('', '') is the whole basic catalog."""
+    def full(path):
+        path = (path or '').strip()
+        return os.path.abspath(os.path.expanduser(path)) if path else ''
+    spec = tuple(spec or ())
+    return (full(spec[0] if len(spec) > 0 else ''), full(spec[1] if len(spec) > 1 else ''))
+
+
+def _names(draws, kind):
+    """The list of `kind` in an `a2ui_draws` file, or None when it has none."""
+    names = draws.get(kind)
+    if names is None:
+        return None
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise ValueError(f"'{kind}' must be a list of names")
+    return names
+
+
+def _sdk(spec=()):
+    """The request processor for a spec: the basic catalog or the document a
+    profile names, cut down to what its app draws when it says so. Raises
+    Unavailable (no SDK, or a file that does not load)."""
+    key = _key(spec)
+    document, draws_file = key
+    processor = _processors.get(key)
+    if processor is not None:
+        return processor
     with _lock:
-        if _processor is None:
+        processor = _processors.get(key)
+        if processor is None:
             try:
-                from a2ui.core.basic_catalog import BasicCatalog
                 from a2ui.processor.processor import A2uiRequestProcessor
-                _processor = A2uiRequestProcessor(catalogs=[BasicCatalog(PROTOCOL)])
+                if document:
+                    from a2ui.processor.catalog_config import CatalogConfig
+                    api = CatalogConfig.from_path(document).transformed_catalog
+                else:
+                    from a2ui.core.basic_catalog import BasicCatalog
+                    api = BasicCatalog(PROTOCOL)
+                if draws_file:
+                    from a2ui.catalog_transformers.pruning import (
+                        ComponentPruningTransformer, FunctionPruningTransformer)
+                    with open(draws_file, encoding='utf-8') as f:
+                        draws = json.load(f)
+                    if not isinstance(draws, dict):
+                        raise ValueError("a2ui_draws must hold a JSON object")
+                    components, functions = _names(draws, 'components'), _names(draws, 'functions')
+                    if components is not None:
+                        unknown = sorted(set(components) - set(api.components))
+                        if unknown:
+                            raise ValueError(f"a2ui_draws names components the catalog does not have: {unknown[:10]}")
+                        api = ComponentPruningTransformer(components).transform(api)
+                    if functions is not None:
+                        api = FunctionPruningTransformer(functions).transform(api)
+                processor = _processors[key] = A2uiRequestProcessor(catalogs=[api])
             except Exception as e:
                 raise Unavailable(f"{type(e).__name__}: {e}") from e
-    return _processor
+    return processor
 
 
-def available():
-    """(True, '') when the SDK loads, else (False, why)."""
+def available(spec=()):
+    """(True, '') when the SDK loads (and the files the spec names, if any),
+    else (False, why)."""
     try:
-        _sdk()
+        _sdk(spec)
         return True, ''
     except Unavailable as e:
         return False, str(e)
@@ -132,13 +195,17 @@ def forget(conversation_id):
 
 
 def _fallback(messages):
-    """A line for apps that cannot draw the surface: the first texts written in it."""
+    """A line for apps that cannot draw the surface: the first texts written in it
+    (a component's `text`, or its `title` when it has no text)."""
     texts = []
 
     def walk(v):
         if isinstance(v, dict):
-            if v.get('component') == 'Text' and isinstance(v.get('text'), str):
-                texts.append(v['text'].strip())
+            if isinstance(v.get('component'), str):
+                for name in ('text', 'title'):
+                    if isinstance(v.get(name), str) and v[name].strip():
+                        texts.append(v[name].strip())
+                        break
             for x in v.values():
                 walk(x)
         elif isinstance(v, list):
@@ -150,8 +217,9 @@ def _fallback(messages):
     return f"[Interactive message] {line}" if line else ""
 
 
-def run(text, conversation_id):
-    """Compile and check every block of an answer.
+def run(text, conversation_id, spec=()):
+    """Compile and check every block of an answer against what the profile
+    writes for (`spec_of(profile)`; the empty spec is the whole basic catalog).
 
     Returns one of:
       ('send', parts)    every block passed. `parts` is the answer in order:
@@ -162,14 +230,16 @@ def run(text, conversation_id):
                          missing): the answer without its blocks
     """
     try:
-        processor = _sdk()
+        processor = _sdk(spec)
     except Unavailable as e:
-        logging.error(f"a2ui_block: the A2UI agent SDK is not available ({e}); block cut out")
+        logging.error(f"a2ui_block: the block cannot be checked ({e}); block cut out")
         return 'plain', strip(text)
+    key = _key(spec)
     with _lock:
-        state = _states.get(conversation_id)
-        if state is None:
-            state = _states[conversation_id] = processor.create_state()
+        held = _states.get(conversation_id)
+        if held is None or held[0] != key:    # a state belongs to one catalog
+            held = _states[conversation_id] = (key, processor.create_state())
+        state = held[1]
     try:
         # All or nothing: a rejected answer leaves the state as it was.
         parsed = processor.parse_response(text, state=state)
@@ -255,20 +325,30 @@ def incoming_text(payload):
 
 # --- the lesson ------------------------------------------------------------------------
 
-def skill_path():
-    return os.path.join(Config.DATA_DIR, 'a2ui', 'SKILL.md')
+def skill_path(spec=()):
+    """Where the lesson of a spec is: `<data_dir>/a2ui/SKILL.md` for the whole
+    basic catalog, `<data_dir>/a2ui/<name>/SKILL.md` for any other (the name is
+    made from the spec's paths, so two specs never share a file)."""
+    key = _key(spec)
+    if key == ('', ''):
+        return os.path.join(Config.DATA_DIR, 'a2ui', 'SKILL.md')
+    stem = os.path.splitext(os.path.basename(key[0]))[0].lower() if key[0] else 'basic'
+    stem = re.sub(r'[^a-z0-9]+', '-', stem).strip('-') or 'catalog'
+    mark = hashlib.sha256(os.path.normcase('|'.join(key)).encode('utf-8')).hexdigest()[:8]
+    return os.path.join(Config.DATA_DIR, 'a2ui', f"{stem}-{mark}", 'SKILL.md')
 
 
-def write_skill():
+def write_skill(spec=()):
     """Write the lesson the SDK generates from the catalog (the Express rules and
-    every component and function) to `<data_dir>/a2ui/SKILL.md`, and return its
-    path. Written again on every start, so it always matches the installed SDK."""
+    every component and function the profile may use) to `skill_path(spec)`,
+    and return its path. Written again on every start, so it always matches the
+    installed SDK and the files the spec names."""
     from a2ui.skill import SkillGenerator
-    processor = _sdk()
+    processor = _sdk(spec)
     skill = SkillGenerator(processor.format).generate_skill(
         name="a2ui",
         description="How to write an <a2ui> block: the A2UI Express notation and the catalog.")
-    path = skill_path()
+    path = skill_path(spec)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -277,16 +357,18 @@ def write_skill():
     return path
 
 
-def note():
+def note(spec=()):
     """The paragraph that tells a profile with `a2ui = true` about the block
-    (modules/prompts.py adds it to the system prompt of every run)."""
+    (modules/prompts.py adds it to the system prompt of every run). `spec` is
+    `spec_of(profile)`: it decides which lesson file is named."""
     return (
         "<a2ui>: an interface instead of plain words. In a private chat you may put a block "
         "<a2ui> ... </a2ui> in your answer and the person's app draws it: buttons, a form with "
-        "fields and pickers, a list, a card. Use it when pressing or filling in is easier for them "
+        "fields and pickers, a list, a card, and whatever else the catalog in the lesson file "
+        "holds. Use only components and properties that file lists. Use it when pressing or filling in is easier for them "
         "than typing; plain text is still the normal answer. The text around the block is sent as "
         "usual. The block is written in A2UI Express; the rules and every component are in the file "
-        f"{skill_path()} : read it before your first block. gpette checks the block before it is "
+        f"{skill_path(spec)} : read it before your first block. gpette checks the block before it is "
         "sent; if it is refused you get the reason and write your whole answer again. Give each "
         "surface an id with surface(\"<id>\"). To change a surface you already sent, write a block "
         "that targets the same id and assigns its data ($/path = value); the app updates it in "

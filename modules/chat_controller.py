@@ -546,7 +546,7 @@ class ChatController:
             return as_plain(a2ui_block.strip(text), "this profile may not send a2ui: block cut out")
         if kind == "group":
             return as_plain(a2ui_block.strip(text), "a2ui is for private chats: block cut out")
-        outcome, value = a2ui_block.run(text, conversation_id)
+        outcome, value = a2ui_block.run(text, conversation_id, a2ui_block.spec_of(profile))
         if outcome == 'retry' and not isinstance(service, ClaudeCodeService):
             return as_plain(a2ui_block.strip(text), "block refused and this engine cannot take the error back")
         if outcome == 'retry':

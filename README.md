@@ -273,12 +273,28 @@ Limits today:
 
 - Private chats only; in a group the block is cut out and the text is sent.
 - Only a Claude Code run can take the error back. On another engine a block that fails is cut out.
-- The catalog is A2UI's basic catalog, protocol 1.0, and the app is assumed to draw all of it. Nothing is negotiated.
+- A profile writes for one catalog, and nothing is negotiated with the app: you say what it draws (below).
 - The surfaces a conversation holds are kept in memory. After a restart an update to an older surface is refused and the model is told to send it again.
 - A profile fenced to its own folder (`per_inbox`) cannot read the lesson file.
 - Whoever the bot talks to can press anything the bot drew. Treat an action like a typed message: it is the person's input.
 
-`tests/test_a2ui_block.py` runs the block, the check, the fixes and the round trip with a scripted model.
+### Another catalog
+
+Without more, a profile writes for A2UI's basic catalog (protocol 1.0) and the app is assumed to draw all of it. Two keys change that:
+
+```toml
+[profiles.me]
+a2ui = true
+a2ui_catalog = "/path/to/catalog.json"   # a catalog document, as its author publishes it
+a2ui_draws = "/path/to/drawn.json"       # what the app draws of it, when not everything
+```
+
+- `a2ui_catalog` is the path of a catalog document: the JSON file that lists a catalog's components and functions. The lesson and the check are then made from it, so the model learns that catalog and a block is refused when it strays from it. The app must draw that catalog.
+- `a2ui_draws` is the path of a JSON file, `{"components": ["Card", "Button"], "functions": ["formatDate"]}`. Either list may be left out, which means all of that kind. The lesson teaches only what is listed, and a block that uses anything else is refused with the reason, like any other mistake. Use it when the app has widgets for part of a catalog. It works on the basic catalog too.
+
+Each different pair of the two has its own lesson file under `<data_dir>/a2ui/`, written at start, and each profile is told where its own is. A file that does not load is logged at start; until it loads, that profile's blocks are cut out and its text is sent.
+
+`tests/test_a2ui_block.py` runs the block, the check, the fixes, a catalog of the profile's own and the round trip with a scripted model.
 
 ## What a profile is told
 

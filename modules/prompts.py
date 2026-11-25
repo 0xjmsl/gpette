@@ -65,8 +65,10 @@ def blocks_note(profile, claude_code=True) -> str:
                 "conversation with a public folder for this person, ask before sending, so you "
                 "can pick the right way.")
         parts.append(text)
-    if getattr(profile, 'a2ui', False) and a2ui_block.available()[0]:
-        parts.append(a2ui_block.note())
+    if getattr(profile, 'a2ui', False):
+        spec = a2ui_block.spec_of(profile)
+        if a2ui_block.available(spec)[0]:
+            parts.append(a2ui_block.note(spec))
     if getattr(profile, 'admin_profile', ''):
         parts.append(
             "[ADMIN_TURN]: you cannot act outside this chat. When the person needs something only "

@@ -59,6 +59,13 @@ gate = "open"
 members = ["group_club"]
 gate = "open"
 a2ui = true
+
+[profiles.wide]
+members = ["wide_user"]
+gate = "open"
+a2ui = true
+a2ui_catalog = "{DATA.replace(chr(92), "/")}/own_catalog.json"
+a2ui_draws = "{DATA.replace(chr(92), "/")}/draws.json"
 ''')
 os.environ["GPETTE_CONFIG"] = CONFIG
 
@@ -249,6 +256,53 @@ check("without a2ui = true the block is cut and the text goes out",
       shape(sent) == ["text"] and sent[0]["content"]["value"] == "Here.", sent)
 sent = turn("group_club", "owner", "menu please", ["Here.\n" + MENU], 1, kind="group")
 check("in a group the block is cut too", shape(sent) == ["text"] and sent[0]["content"]["value"] == "Here.", sent)
+
+# --- a catalog of the profile's own, and what its app draws ------------------------------
+# The document is the basic catalog written out under another id: any catalog
+# document is read the same way.
+from a2ui.core.basic_catalog import BasicCatalog  # noqa: E402
+
+document = BasicCatalog("1.0").to_json()
+document["catalogId"] = "https://example.com/catalogs/own/v1"
+OWN = os.path.join(DATA, "own_catalog.json")
+DRAWS = os.path.join(DATA, "draws.json")
+with open(OWN, "w", encoding="utf-8") as f:
+    json.dump(document, f)
+with open(DRAWS, "w", encoding="utf-8") as f:
+    json.dump({"components": ["Card", "Column", "Text", "Button"]}, f)
+
+wide = profiles.resolve_profile("dm_wide", "wide_user", "dm")
+spec = a2ui_block.spec_of(wide)
+check("a profile reads a2ui_catalog and a2ui_draws", spec == (OWN.replace(chr(92), "/"), DRAWS.replace(chr(92), "/")), spec)
+check("a profile without them writes for the whole basic catalog", a2ui_block.spec_of(main) == ("", ""))
+check("the catalog document and the draws file load", a2ui_block.available(spec) == (True, ""), a2ui_block.available(spec))
+own_path = a2ui_block.write_skill(spec)
+own_lesson = open(own_path, encoding="utf-8").read()
+check("each spec has its own lesson file", own_path != path and own_path.startswith(DATA)
+      and a2ui_block.skill_path((OWN, "")) not in (path, own_path), own_path)
+check("the lesson teaches only what the app draws",
+      "Button(" in own_lesson and "ChoicePicker(" not in own_lesson and "ChoicePicker(" in lesson)
+check("the profile is pointed at its own lesson", own_path in prompts.blocks_note(wide) and path not in prompts.blocks_note(wide))
+outcome, value = a2ui_block.run('<a2ui>\nsurface("w1")\nroot = Card(Column([Text("hi"), Button(Text("Go"), action=Event("go"))]))\n</a2ui>',
+                                "dm_wide", spec)
+created = [m for part in (value if outcome == "send" else []) if "a2ui" in part
+           for m in part["a2ui"]["messages"] if "createSurface" in m]
+check("a block is compiled against the profile's catalog",
+      outcome == "send" and created and created[0]["createSurface"].get("catalogId") == document["catalogId"], (outcome, value))
+outcome, value = a2ui_block.run('<a2ui>\nsurface("w2")\nroot = Card(Column([Text("hi"), Divider()]))\n</a2ui>', "dm_wide", spec)
+check("a component the app does not draw is refused", outcome == "retry" and "Divider" in value, (outcome, value))
+outcome, value = a2ui_block.run('<a2ui>\nsurface("w3")\nroot = Card(Column([Text("hi"), Divider()]))\n</a2ui>', "dm_wide", (OWN, ""))
+check("without a draws file the whole catalog is allowed (and a new spec starts a new state)", outcome == "send", (outcome, value))
+with open(DRAWS, "w", encoding="utf-8") as f:
+    json.dump({"components": ["Card", "NoSuchThing"]}, f)
+bad_draws = os.path.join(DATA, "draws2.json")
+os.replace(DRAWS, bad_draws)
+ok, why = a2ui_block.available((OWN, bad_draws))
+check("a draws file that names an unknown component does not load", not ok and "NoSuchThing" in why, why)
+ok, why = a2ui_block.available((os.path.join(DATA, "missing.json"), ""))
+check("a missing catalog document does not load", not ok, why)
+outcome, value = a2ui_block.run("Words.\n" + MENU, "dm_missing", (os.path.join(DATA, "missing.json"), ""))
+check("and its profile's answer goes out without the block", (outcome, value) == ("plain", "Words."), (outcome, value))
 
 # --- the way out -----------------------------------------------------------------------------
 from server import server as srv  # noqa: E402

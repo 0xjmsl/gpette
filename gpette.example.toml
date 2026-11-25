@@ -66,6 +66,10 @@ default = "answer"                   # who this gpette answers when no rule matc
 
 # a2ui = true on a profile lets it answer with an interface the person's app draws
 # (buttons, forms, lists; README: Interfaces the app draws). Needs: pip install a2ui-agent-sdk
+# a2ui_catalog = "<path>/catalog.json" beside it makes the profile write for that catalog
+# document instead of A2UI's basic catalog (the app must draw it).
+# a2ui_draws = "<path>/draws.json" says what the app draws when that is not the whole
+# catalog: {"components": ["Card", ...], "functions": [...]}.
 
 [send]                               # [SEND_XMTP_MESSAGE], for profiles with send = true
 per_item = 3                         # sends a turn gets for each timer fire or stacked message

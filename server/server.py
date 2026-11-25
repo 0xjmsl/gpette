@@ -78,14 +78,21 @@ def create_server(config_class):
     thread_controller.start()
 
     # Profiles with a2ui = true: the lesson their runs read is written from the
-    # installed A2UI agent SDK (modules/a2ui_block.py).
-    if any(isinstance(p, dict) and p.get('a2ui') for p in (config_class.PROFILES or {}).values()):
-        ok, why = a2ui_block.available()
+    # installed A2UI agent SDK (modules/a2ui_block.py), one file for each
+    # different (`a2ui_catalog`, `a2ui_draws`) the profiles name.
+    a2ui_specs = sorted({(str(p.get('a2ui_catalog') or '').strip(), str(p.get('a2ui_draws') or '').strip())
+                         for p in (config_class.PROFILES or {}).values()
+                         if isinstance(p, dict) and p.get('a2ui')})
+    for spec in a2ui_specs:
+        ok, why = a2ui_block.available(spec)
         if ok:
             try:
-                logging.info(f"a2ui: lesson written to {a2ui_block.write_skill()}")
+                logging.info(f"a2ui: lesson written to {a2ui_block.write_skill(spec)}")
             except Exception:
                 logging.exception("a2ui: could not write the lesson file")
+        elif any(spec):
+            logging.error(f"a2ui_catalog '{spec[0]}' / a2ui_draws '{spec[1]}' on a profile did not load "
+                          f"({why}). Until it does, that profile's <a2ui> blocks are cut out.")
         else:
             logging.error(f"a2ui = true on a profile, but the A2UI agent SDK did not load ({why}). "
                           f"Install it: pip install a2ui-agent-sdk. Until then <a2ui> blocks are cut out.")

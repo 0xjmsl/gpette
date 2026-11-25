@@ -8,6 +8,7 @@ Newest first. gpette has no version numbers yet: entries are dated, and `main` i
 
 ### New
 
+- **`<a2ui>` for any catalog.** `a2ui_catalog = "<path>"` on a profile makes it write for that catalog document instead of A2UI's basic catalog, and `a2ui_draws = "<path>"` names a JSON file with the components and functions the app draws when that is not all of them. The lesson and the check follow both; each pair has its own lesson file. README: Another catalog.
 - **Interfaces the app draws: `<a2ui>`.** A profile with `a2ui = true` can answer with buttons, a form or a list, written as an [A2UI](https://a2ui.org) block and drawn by the person's app. The A2UI agent SDK (`pip install a2ui-agent-sdk`, optional) writes the lesson the model reads, turns the block into A2UI messages and checks them; a block that fails goes back to the model with the reason. A button press comes back as a message that starts `[A2UI action]`. Needs an xmtp_daemon that knows the `a2ui` content type. README: Interfaces the app draws. Tests: `tests/test_a2ui_block.py`.
 
 ## 2026-11-20
